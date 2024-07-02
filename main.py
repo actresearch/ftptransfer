@@ -46,6 +46,7 @@ def my_function():
                 #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
                 message.save_as_eml(to_path=Path('C:/Users/JOSH/Commercial Vehicle Preliminary Net Orders.eml'))
 
+
 def run_function():
     thread = threading.Timer(60.0, run_function) # 60 seconds = 1 minute
     thread.start()
