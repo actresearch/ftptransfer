@@ -1,8 +1,13 @@
-from O365 import Account, FileSystemTokenBackend
+from O365 import Account, FileSystemTokenBackend, mailbox
 import startbatch
 from datetime import datetime
+from pathlib import Path
 
 import threading
+
+
+
+#documentation -- https://github.com/O365/python-o365
 
 credentials = ('REDACTED_CLIENT_ID', 'REDACTED_CLIENT_SECRET')
 
@@ -13,7 +18,8 @@ account = Account(credentials, auth_flow_type='credentials', tenant_id='REDACTED
 
 currentMonth = datetime.now().month
 currentYear = datetime.now().year
-
+#Path = "C:/Users/ITGURU/PycharmProjects/JSON/"
+#Path = "C:/Users/ITGURU/PycharmProjects/JSON/"
 def my_function():
     if account.authenticate():
 
@@ -26,8 +32,19 @@ def my_function():
 
             if "U.S. Trailers Report" in messagetocheck:
                 startbatch.runbatch()
-                print("true")
             print(message)
+
+            if "Transportation Digest" in messagetocheck:
+                startbatch.runbatch()
+            print(message)
+
+            if "Commercial Vehicle Dealer Digest" in messagetocheck:
+                startbatch.runbatch()
+            print(message)
+
+            if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
+                #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
+                message.save_as_eml(to_path=Path('C:/Users/JOSH/Commercial Vehicle Preliminary Net Orders.eml'))
 
 def run_function():
     thread = threading.Timer(60.0, run_function) # 60 seconds = 1 minute
