@@ -1,4 +1,6 @@
 from O365 import Account, FileSystemTokenBackend, mailbox
+
+import runjson
 import startbatch
 from datetime import datetime
 from pathlib import Path
@@ -38,14 +40,17 @@ def my_function():
                 startbatch.runbatch()
             print(message)
 
+
+
             if "Commercial Vehicle Dealer Digest" in messagetocheck:
                 startbatch.runbatch()
             print(message)
 
             if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
                 #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
-                message.save_as_eml(to_path=Path('C:/Users/JOSH/Commercial Vehicle Preliminary Net Orders.eml'))
-
+                message.save_as_eml(to_path=Path('C:/Users/ACTServer1/Services/Commercial Vehicle Preliminary Net Orders.eml'))
+                runjson.runbatch()
+            print("JSON Ran Successfully")
 
 def run_function():
     thread = threading.Timer(60.0, run_function) # 60 seconds = 1 minute
