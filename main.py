@@ -34,23 +34,23 @@ def my_function():
 
             if "U.S. Trailers Report" in messagetocheck:
                 startbatch.runbatch()
-            print(message)
+                print(message)
 
             if "Transportation Digest" in messagetocheck:
                 startbatch.runbatch()
-            print(message)
+                print(message)
 
 
 
             if "Commercial Vehicle Dealer Digest" in messagetocheck:
                 startbatch.runbatch()
-            print(message)
+                print(message)
 
             if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
                 #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
                 message.save_as_eml(to_path=Path('C:/Users/ACTServer1/Services/Commercial Vehicle Preliminary Net Orders.eml'))
                 runjson.runbatch()
-            print("JSON Ran Successfully")
+                print("JSON Ran Successfully")
 
 def run_function():
     thread = threading.Timer(60.0, run_function) # 60 seconds = 1 minute
