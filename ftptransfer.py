@@ -32,12 +32,12 @@ def my_function():
         print('Authenticated!')
         mailbox = account.mailbox('jrobinson@actresearch.net')
         inbox = mailbox.inbox_folder()
-        query = mailbox.new_query()
-        queryresult = query.on_attribute('created_date_time').greater(
-            datetime(threeminago.year, threeminago.month, threeminago.day, threeminago.hour, threeminago.minute))
-        filtered_messages = mailbox.get_messages(query=queryresult)
+        #query = mailbox.new_query()
+        #queryresult = query.on_attribute('created_date_time').greater(
+            #datetime(threeminago.year, threeminago.month, threeminago.day, threeminago.hour, threeminago.minute))
+        #filtered_messages = mailbox.get_messages(query=queryresult)
 
-        for message in filtered_messages:
+        for message in mailbox.get_messages():
             messagetocheck = str(message)
 
 
