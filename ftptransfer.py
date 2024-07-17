@@ -44,16 +44,19 @@ def my_function():
             if "U.S. Trailers Report" in messagetocheck:
                 startbatch.runbatch()
                 print(message)
+                message.delete()
 
             if "Transportation Digest" in messagetocheck:
                 startbatch.runbatch()
                 print(message)
+                message.delete()
 
 
 
             if "Commercial Vehicle Dealer Digest" in messagetocheck:
                 startbatch.runbatch()
                 print(message)
+                message.delete()
 
             if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
                 #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
