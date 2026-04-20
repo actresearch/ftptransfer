@@ -35,7 +35,6 @@ SCRIPTS_PATH = Path(os.getenv('SCRIPTS_PATH', str(MOUNTS_ROOT / 'mlp')))
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
 
-
 if not CLIENT_ID or not CLIENT_SECRET or not TENANT_ID:
     raise RuntimeError("O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set")
 
