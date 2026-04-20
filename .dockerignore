@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+__pycache__
+.venv
+.env
+my_folder
+o365_token.txt
+*.pyc

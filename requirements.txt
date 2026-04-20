@@ -1,0 +1,10 @@
+APScheduler
+chardet
+Flask
+flask-cors
+Flask-SSE
+gevent
+gunicorn
+O365
+redis
+watchdog
