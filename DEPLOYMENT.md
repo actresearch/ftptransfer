@@ -5,7 +5,7 @@ The long-term setup for this service is:
 1. Build a Docker image in GitHub Actions.
 2. Push the image to GHCR.
 3. Run the service as a Portainer stack with Docker Compose.
-4. Update via Portainer redeploys or Watchtower.
+4. Let Watchtower detect the new image and restart the app automatically.
 
 This repo now includes the pieces for that workflow.
 
@@ -16,6 +16,7 @@ This repo now includes the pieces for that workflow.
 - Your existing Linux host folders stay on the host and are bind-mounted into the container.
 - Portainer manages the stack.
 - GitHub Actions builds and publishes the image.
+- Watchtower automatically updates the app container when GHCR gets a new image.
 
 ## Host setup on the Proxmox Linux guest
 
@@ -32,13 +33,9 @@ cd /opt/ftptransfer
 Copy these repo files there:
 
 - `docker-compose.yml`
-- `.env.example` copied to `.env`
+- `.env.example` as a reference only
 
-Create `.env` and set the real values:
-
-```bash
-cp .env.example .env
-```
+You can either create a real `.env` file on the server or, more simply, enter the same values in Portainer's stack environment variables UI.
 
 The important setting is the host bind mount:
 
@@ -60,7 +57,7 @@ In Portainer:
 1. Go to `Stacks`
 2. Create a new stack
 3. Paste `docker-compose.yml`
-4. Upload or recreate the `.env` values
+4. Add the environment variables from `.env.example`
 5. Deploy the stack
 
 If you prefer CLI first:
@@ -77,38 +74,43 @@ The workflow in `.github/workflows/docker-image.yml` builds the image and pushes
 ghcr.io/actresearch/ftptransfer:latest
 ```
 
-Add these repository secrets if you want Portainer to redeploy automatically after a push:
+Make sure the GHCR package is readable by your Docker host:
 
-- `PORTAINER_WEBHOOK_URL`
-
-If that secret is not present, the image still builds and pushes successfully, and you can redeploy from Portainer manually.
+- easiest option: make `ghcr.io/actresearch/ftptransfer` public
+- private option: log Portainer into `ghcr.io` with a GitHub token that has `read:packages`
 
 ## Update strategies
 
-### Recommended: controlled redeploy from Portainer
+### Recommended: Watchtower automatic updates
 
 - GitHub Actions pushes a new image
-- Portainer pulls and redeploys when you trigger it
+- Watchtower checks GHCR every 5 minutes
+- If the image changed, Watchtower pulls it and restarts only the labeled app container
 
-This is the safest production approach.
-
-### Optional: Watchtower
-
-The compose file includes an optional `watchtower` service under the `ops` profile.
-
-Run it only if you want automatic image-based updates:
-
-```bash
-docker compose --profile ops up -d
-```
+This is the most hands-off approach.
 
 Watchtower only updates containers with this label:
 
-```bash
-com.centurylinklabs.watchtower.enable=true
-```
+`com.centurylinklabs.watchtower.enable=true`
 
 That keeps updates limited to this stack.
+
+### What you need to enter in Portainer
+
+At minimum, add these environment variables in the stack:
+
+- `O365_CLIENT_ID`
+- `O365_CLIENT_SECRET`
+- `O365_TENANT_ID`
+- `MOUNTS_ROOT=/home/actserver/mounts`
+
+Usually you will also want:
+
+- `MAILBOX_USER`
+- `COMPLETED_FOLDER`
+- `FLASK_PORT=5000`
+
+The path-related variables already have defaults that match your current Linux layout.
 
 ## Local development auto-restart
 

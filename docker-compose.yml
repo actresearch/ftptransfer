@@ -3,9 +3,18 @@ services:
     image: ghcr.io/actresearch/ftptransfer:${IMAGE_TAG:-latest}
     container_name: ftptransfer
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
+      O365_CLIENT_ID: ${O365_CLIENT_ID:-}
+      O365_CLIENT_SECRET: ${O365_CLIENT_SECRET:-}
+      O365_TENANT_ID: ${O365_TENANT_ID:-}
+      MAILBOX_USER: ${MAILBOX_USER:-jrobinson@actresearch.net}
+      COMPLETED_FOLDER: ${COMPLETED_FOLDER:-CompletedAutomations}
+      MOUNTS_ROOT: ${MOUNTS_ROOT:-/home/actserver/mounts}
+      TOKEN_PATH: ${TOKEN_PATH:-/home/actserver/mounts/token}
+      TOKEN_FILENAME: ${TOKEN_FILENAME:-my_token.txt}
+      JSON_REPORTS_PATH: ${JSON_REPORTS_PATH:-/home/actserver/mounts/json/Reports}
+      PRELIMS_PATH: ${PRELIMS_PATH:-/home/actserver/mounts/prelims}
+      SCRIPTS_PATH: ${SCRIPTS_PATH:-/home/actserver/mounts/mlp}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       FLASK_HOST: 0.0.0.0
       FLASK_PORT: ${FLASK_PORT:-5000}
@@ -40,10 +49,11 @@ services:
     image: containrrr/watchtower:latest
     container_name: ftptransfer-watchtower
     restart: unless-stopped
-    profiles: ["ops"]
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     command:
       - --label-enable
+      - --cleanup
+      - --rolling-restart
       - --interval
       - "300"
