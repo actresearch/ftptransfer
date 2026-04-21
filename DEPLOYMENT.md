@@ -79,6 +79,34 @@ Make sure the GHCR package is readable by your Docker host:
 - easiest option: make `ghcr.io/actresearch/ftptransfer` public
 - private option: log Portainer into `ghcr.io` with a GitHub token that has `read:packages`
 
+Important: a public GitHub repository does not automatically guarantee anonymous pulls from GHCR. The container package itself must be public, or Portainer / Docker must authenticate to `ghcr.io`.
+
+If Portainer fails with:
+
+```text
+Head "https://ghcr.io/v2/actresearch/ftptransfer/manifests/latest": unauthorized
+```
+
+check these items in order:
+
+1. Open the package page for `actresearch/ftptransfer` in GitHub Packages and confirm the package visibility is `Public`.
+2. Confirm the package actually contains a `latest` tag.
+3. If the package is private or org policy blocks anonymous pulls, add a GHCR registry in Portainer or run `docker login ghcr.io` on the Docker host with a classic GitHub PAT that has `read:packages`.
+
+If the error changes to:
+
+```text
+manifest unknown
+```
+
+that usually means GHCR can be reached, but the requested tag does not exist yet. This repo's workflow should publish `latest` from `main` or `master`, plus branch and SHA tags for troubleshooting.
+
+If you add a Portainer registry, use:
+
+- registry: `ghcr.io`
+- username: your GitHub username
+- password/token: a classic PAT with at least `read:packages`
+
 ## Update strategies
 
 ### Recommended: Watchtower automatic updates

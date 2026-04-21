@@ -3,6 +3,7 @@ name: Build and Publish Container
 on:
   push:
     branches:
+      - main
       - master
   workflow_dispatch:
 
@@ -31,7 +32,8 @@ jobs:
         with:
           images: ghcr.io/actresearch/ftptransfer
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+            type=ref,event=branch
             type=sha
 
       - name: Build and push image
