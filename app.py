@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import os
-from flask import Flask, Response
+import threading
+from flask import Flask, Response, stream_with_context
 from flask_cors import CORS
 from flask_sse import sse
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -34,6 +35,8 @@ PRELIMS_PATH = Path(os.getenv('PRELIMS_PATH', str(MOUNTS_ROOT / 'prelims')))
 SCRIPTS_PATH = Path(os.getenv('SCRIPTS_PATH', str(MOUNTS_ROOT / 'mlp')))
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
+AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL', '300'))
+STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL', '60'))
 
 if not CLIENT_ID or not CLIENT_SECRET or not TENANT_ID:
     raise RuntimeError("O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set")
@@ -44,6 +47,11 @@ credentials = (CLIENT_ID, CLIENT_SECRET)
 token_backend = FileSystemTokenBackend(token_path=str(TOKEN_PATH), token_filename=TOKEN_FILENAME)
 account = Account(credentials, auth_flow_type='credentials', tenant_id=TENANT_ID,
                   token_backend=token_backend)
+
+auth_lock = threading.Lock()
+last_auth_check = 0
+last_auth_ok = False
+last_auth_error = None
 
 currentMonth = datetime.now().month
 currentYear = datetime.now().year
@@ -134,6 +142,40 @@ def script_path(name):
     return str(SCRIPTS_PATH / name)
 
 
+def sse_event(event, payload):
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def message_text(message):
+    subject = getattr(message, "subject", None)
+    return str(subject or message)
+
+
+def ensure_authenticated():
+    """Cache O365 auth checks so connected streams do not hammer MSAL."""
+    global last_auth_check, last_auth_ok, last_auth_error
+
+    now = time.monotonic()
+    if last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
+        return last_auth_ok, last_auth_error
+
+    with auth_lock:
+        now = time.monotonic()
+        if last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
+            return last_auth_ok, last_auth_error
+
+        last_auth_check = now
+        try:
+            last_auth_ok = bool(account.authenticate())
+            last_auth_error = None if last_auth_ok else "O365 authentication returned false"
+        except Exception as exc:
+            last_auth_ok = False
+            last_auth_error = str(exc)
+            print(f"ERROR: O365 authentication failed: {exc}", flush=True)
+
+        return last_auth_ok, last_auth_error
+
+
 @app.route("/healthz")
 def healthz():
     payload = {
@@ -142,17 +184,37 @@ def healthz():
     }
     return payload, 200
 
+
+@app.route("/stream-test")
+def stream_test():
+    @stream_with_context
+    def test_events():
+        while True:
+            payload = {
+                "status": "ok",
+                "timestamp": datetime.now().isoformat()
+            }
+            yield sse_event("time", payload)
+            sys.stdout.flush()
+            time.sleep(15)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
+    }
+    return Response(test_events(), mimetype='text/event-stream', headers=headers)
+
 @app.route("/stream")
 def stream():
 
+    @stream_with_context
     def my_function():
 
-        AUTH_CHECK_INTERVAL = 300  # Re-authenticate every 5 minutes
-        last_auth_check = 0
-
         while True:
-            
-            if account.authenticate():
+            authenticated, auth_error = ensure_authenticated()
+
+            if authenticated:
                 _time = datetime.now().isoformat()
                 heartbeat_payload = {
                     "status": "authenticated",
@@ -166,9 +228,24 @@ def stream():
                 destination = mailbox.get_folder(folder_name=COMPLETED_FOLDER)
 
                 for message in inbox.get_messages(10):
-                    messagetocheck = str(message)
+                    messagetocheck = message_text(message)
+                    print(f"Checking message: {messagetocheck}", flush=True)
+                    payload = {
+                        "status": "message_seen",
+                        "message": messagetocheck,
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    yield sse_event("ftp_event", payload)
+                    sys.stdout.flush()
 
                     if "Used Truck Flash Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "Used Truck Flash Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptUSEDFlash.sh")])
                         payload = {
                             "status": "script_ran",
@@ -180,6 +257,13 @@ def stream():
                         message.move(destination)
 
                     if "Freight Forecast OUTLOOK Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "Freight Forecast OUTLOOK Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptFREIGHTOUTLOOK.sh")])
                         payload = {
                             "status": "script_ran",
@@ -192,6 +276,13 @@ def stream():
 
 
                     if "U.S. Trailer Flash" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "U.S. Trailer Flash",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptUSTrailer.sh")])
                         payload = {
                             "status": "script_ran",
@@ -203,6 +294,13 @@ def stream():
                         message.move(destination)
 
                     if "U.S. Used Truck Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "U.S. Used Truck Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptUSED.sh")])
                         payload = {
                             "status": "script_ran",
@@ -214,6 +312,13 @@ def stream():
                         message.move(destination)
 
                     if "SOI N.A. Classes 5-8 Vehicles Flash Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "SOI N.A. Classes 5-8 Vehicles Flash Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptNAC58.sh")])
                         payload = {
                             "status": "script_ran",
@@ -225,6 +330,13 @@ def stream():
                         message.move(destination)
 
                     if "Build & Retail Sales Flash Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "Build & Retail Sales Flash Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptNABURS.sh")])
                         payload = {
                             "status": "script_ran",
@@ -236,6 +348,13 @@ def stream():
                         message.move(destination)
 
                     if "Complete BURS Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "Complete BURS Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptNACompleteBurs.sh")])
                         payload = {
                             "status": "script_ran",
@@ -247,6 +366,13 @@ def stream():
                         message.move(destination)
 
                     if "N.A. Commercial Vehicle OUTLOOK Report" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "N.A. Commercial Vehicle OUTLOOK Report",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         subprocess.run(["/bin/bash", script_path("MLPScriptNACVOUTLOOK.sh")])
                         payload = {
                             "status": "script_ran",
@@ -258,6 +384,13 @@ def stream():
                         message.move(destination)
 
                     if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "Commercial Vehicle Preliminary Net Orders",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
                         eml_path = PRELIMS_PATH / 'Commercial Vehicle Preliminary Net Orders.eml'
                         eml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -293,6 +426,13 @@ def stream():
                         message.move(destination)
 
                     if "U.S. Trailer Prelim Net Orders" in messagetocheck:
+                        payload = {
+                            "status": "script_starting",
+                            "message": "U.S. Trailer Prelim Net Orders",
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        sys.stdout.flush()
                         #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
                         eml_path = PRELIMS_PATH / 'U.S. Trailer Prelim Net Orders.eml'
                         eml_path.parent.mkdir(parents=True, exist_ok=True)
@@ -322,13 +462,36 @@ def stream():
             else:
                 payload = {
                     "status": "not_authenticated",
-                    "message": "Not Authenticated",
+                    "message": auth_error or "Not Authenticated",
                     "timestamp": datetime.now().isoformat()
                 }
                 yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
                 sys.stdout.flush()
-            time.sleep(60)
-    return Response(my_function(), mimetype='text/event-stream')
+            time.sleep(STREAM_POLL_INTERVAL)
+
+    def safe_events():
+        while True:
+            try:
+                yield from my_function()
+            except GeneratorExit:
+                raise
+            except Exception as e:
+                print(f"ERROR: stream failed: {e}", flush=True)
+                payload = {
+                    "status": "error",
+                    "message": str(e),
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield sse_event("stream_error", payload)
+                sys.stdout.flush()
+                time.sleep(60)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
+    }
+    return Response(safe_events(), mimetype='text/event-stream', headers=headers)
 
 @app.after_request
 def after_request(response):
