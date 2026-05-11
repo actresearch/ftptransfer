@@ -35,18 +35,21 @@ PRELIMS_PATH = Path(os.getenv('PRELIMS_PATH', str(MOUNTS_ROOT / 'prelims')))
 SCRIPTS_PATH = Path(os.getenv('SCRIPTS_PATH', str(MOUNTS_ROOT / 'mlp')))
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
-AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL', '300'))
-STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL', '60'))
+AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL') or '300')
+STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
 
-if not CLIENT_ID or not CLIENT_SECRET or not TENANT_ID:
-    raise RuntimeError("O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set")
+O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
 
 credentials = (CLIENT_ID, CLIENT_SECRET)
 
 # the default protocol will be Microsoft Graph
 token_backend = FileSystemTokenBackend(token_path=str(TOKEN_PATH), token_filename=TOKEN_FILENAME)
-account = Account(credentials, auth_flow_type='credentials', tenant_id=TENANT_ID,
-                  token_backend=token_backend)
+account = None
+if O365_CONFIGURED:
+    account = Account(credentials, auth_flow_type='credentials', tenant_id=TENANT_ID,
+                      token_backend=token_backend)
+else:
+    print("ERROR: O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set", flush=True)
 
 auth_lock = threading.Lock()
 last_auth_check = 0
@@ -155,6 +158,9 @@ def ensure_authenticated():
     """Cache O365 auth checks so connected streams do not hammer MSAL."""
     global last_auth_check, last_auth_ok, last_auth_error
 
+    if not O365_CONFIGURED or account is None:
+        return False, "O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set"
+
     now = time.monotonic()
     if last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
         return last_auth_ok, last_auth_error
@@ -180,6 +186,7 @@ def ensure_authenticated():
 def healthz():
     payload = {
         "status": "ok",
+        "o365_configured": O365_CONFIGURED,
         "timestamp": datetime.now().isoformat()
     }
     return payload, 200
