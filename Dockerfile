@@ -19,4 +19,4 @@ COPY watchdog_runner.py .
 
 EXPOSE 5000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--worker-class", "gevent", "--workers", "1", "--worker-connections", "100", "--timeout", "0", "app:app"]
+CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:5000 --worker-class gevent --workers ${GUNICORN_WORKERS:-3} --worker-connections ${GUNICORN_WORKER_CONNECTIONS:-100} --timeout 0 app:app"]
