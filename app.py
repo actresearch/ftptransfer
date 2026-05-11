@@ -5,7 +5,7 @@ from pathlib import Path
 import json
 import os
 import threading
-from flask import Flask, Response, stream_with_context
+from flask import Flask, Response, stream_with_context, request
 from flask_cors import CORS
 from flask_sse import sse
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -154,7 +154,7 @@ def message_text(message):
     return str(subject or message)
 
 
-def ensure_authenticated():
+def ensure_authenticated(force=False):
     """Cache O365 auth checks so connected streams do not hammer MSAL."""
     global last_auth_check, last_auth_ok, last_auth_error
 
@@ -162,12 +162,12 @@ def ensure_authenticated():
         return False, "O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set"
 
     now = time.monotonic()
-    if last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
+    if not force and last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
         return last_auth_ok, last_auth_error
 
     with auth_lock:
         now = time.monotonic()
-        if last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
+        if not force and last_auth_check and now - last_auth_check < AUTH_CHECK_INTERVAL:
             return last_auth_ok, last_auth_error
 
         last_auth_check = now
@@ -182,6 +182,35 @@ def ensure_authenticated():
         return last_auth_ok, last_auth_error
 
 
+def auth_status_payload(force=False, check_mailbox=False):
+    authenticated, auth_error = ensure_authenticated(force=force)
+    payload = {
+        "status": "authenticated" if authenticated else "not_authenticated",
+        "authenticated": authenticated,
+        "o365_configured": O365_CONFIGURED,
+        "mailbox_user": MAILBOX_USER,
+        "completed_folder": COMPLETED_FOLDER,
+        "token_path": str(TOKEN_PATH),
+        "token_file_exists": (TOKEN_PATH / TOKEN_FILENAME).exists(),
+        "timestamp": datetime.now().isoformat()
+    }
+    if auth_error:
+        payload["message"] = auth_error
+
+    if authenticated and check_mailbox:
+        try:
+            mailbox_obj = account.mailbox(MAILBOX_USER)
+            mailbox_obj.inbox_folder()
+            mailbox_obj.get_folder(folder_name=COMPLETED_FOLDER)
+            payload["mailbox_ok"] = True
+        except Exception as exc:
+            payload["mailbox_ok"] = False
+            payload["mailbox_error"] = str(exc)
+            print(f"ERROR: O365 mailbox check failed: {exc}", flush=True)
+
+    return payload
+
+
 @app.route("/healthz")
 def healthz():
     payload = {
@@ -190,6 +219,13 @@ def healthz():
         "timestamp": datetime.now().isoformat()
     }
     return payload, 200
+
+
+@app.route("/auth-status")
+def auth_status():
+    force = request.args.get("force") in ("1", "true", "yes")
+    check_mailbox = request.args.get("mailbox") in ("1", "true", "yes")
+    return auth_status_payload(force=force, check_mailbox=check_mailbox), 200
 
 
 @app.route("/stream-test")
@@ -219,15 +255,11 @@ def stream():
     def my_function():
 
         while True:
-            authenticated, auth_error = ensure_authenticated()
+            auth_payload = auth_status_payload()
+            authenticated = auth_payload["authenticated"]
 
             if authenticated:
-                _time = datetime.now().isoformat()
-                heartbeat_payload = {
-                    "status": "authenticated",
-                    "timestamp": _time
-                }
-                yield f'event: time\ndata: {json.dumps(heartbeat_payload)}\n\n'
+                yield sse_event("time", auth_payload)
                 sys.stdout.flush()
 
                 mailbox = account.mailbox(MAILBOX_USER)
@@ -467,12 +499,9 @@ def stream():
                         sys.stdout.flush()
                         message.move(destination)
             else:
-                payload = {
-                    "status": "not_authenticated",
-                    "message": auth_error or "Not Authenticated",
-                    "timestamp": datetime.now().isoformat()
-                }
-                yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                print(f"ERROR: O365 stream not authenticated: {auth_payload.get('message', 'Not Authenticated')}", flush=True)
+                yield sse_event("time", auth_payload)
+                yield sse_event("ftp_event", auth_payload)
                 sys.stdout.flush()
             time.sleep(STREAM_POLL_INTERVAL)
 
