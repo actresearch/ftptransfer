@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends -y bash \
+    && apt-get install --no-install-recommends -y bash openssh-client sshpass \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
