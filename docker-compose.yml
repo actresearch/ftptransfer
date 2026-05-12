@@ -10,6 +10,7 @@ services:
       MAILBOX_USER: ${MAILBOX_USER:-jrobinson@actresearch.net}
       COMPLETED_FOLDER: ${COMPLETED_FOLDER:-CompletedAutomations}
       MOUNTS_ROOT: ${MOUNTS_ROOT:-/home/actserver/mounts}
+      WREPORTS_ROOT: ${WREPORTS_ROOT:-/mnt/wreports}
       TOKEN_PATH: ${TOKEN_PATH:-/home/actserver/mounts/token}
       TOKEN_FILENAME: ${TOKEN_FILENAME:-my_token.txt}
       JSON_REPORTS_PATH: ${JSON_REPORTS_PATH:-/home/actserver/mounts/json/Reports}
@@ -28,6 +29,7 @@ services:
       - "${FLASK_PORT:-5000}:5000"
     volumes:
       - ${MOUNTS_ROOT:-/home/actserver/mounts}:${MOUNTS_ROOT:-/home/actserver/mounts}
+      - ${WREPORTS_ROOT:-/mnt/wreports}:/mnt/wreports
     depends_on:
       redis:
         condition: service_healthy

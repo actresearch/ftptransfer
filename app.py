@@ -29,6 +29,7 @@ TENANT_ID = os.getenv('O365_TENANT_ID')
 MAILBOX_USER = os.getenv('MAILBOX_USER', 'jrobinson@actresearch.net')
 COMPLETED_FOLDER = os.getenv('COMPLETED_FOLDER', 'CompletedAutomations')
 MOUNTS_ROOT = Path(os.getenv('MOUNTS_ROOT', '/home/actserver/mounts'))
+WREPORTS_ROOT = Path(os.getenv('WREPORTS_ROOT', '/mnt/wreports'))
 TOKEN_PATH = Path(os.getenv('TOKEN_PATH', str(MOUNTS_ROOT / 'token')))
 TOKEN_FILENAME = os.getenv('TOKEN_FILENAME', 'my_token.txt')
 JSON_REPORTS_PATH = Path(os.getenv('JSON_REPORTS_PATH', str(MOUNTS_ROOT / 'json' / 'Reports')))
@@ -325,6 +326,8 @@ def transfer_status():
         "status": "ok",
         "mounts_root": str(MOUNTS_ROOT),
         "mounts_root_exists": MOUNTS_ROOT.exists(),
+        "wreports_root": str(WREPORTS_ROOT),
+        "wreports_root_exists": WREPORTS_ROOT.exists(),
         "scripts_path": str(SCRIPTS_PATH),
         "scripts_path_exists": SCRIPTS_PATH.exists(),
         "script_run_timeout_seconds": SCRIPT_RUN_TIMEOUT,
