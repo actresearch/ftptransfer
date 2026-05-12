@@ -39,6 +39,7 @@ FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
 AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL') or '300')
 O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
+SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
 
 O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
 
@@ -58,6 +59,18 @@ auth_executor = ThreadPoolExecutor(max_workers=1)
 last_auth_check = 0
 last_auth_ok = False
 last_auth_error = None
+
+EXPECTED_TRANSFER_SCRIPTS = [
+    "MLPScriptUSEDFlash.sh",
+    "MLPScriptFREIGHTOUTLOOK.sh",
+    "MLPScriptUSTrailer.sh",
+    "MLPScriptUSED.sh",
+    "MLPScriptNAC58.sh",
+    "MLPScriptNABURS.sh",
+    "MLPScriptNACompleteBurs.sh",
+    "MLPScriptNACVOUTLOOK.sh",
+    "MLPScriptPrelim.sh",
+]
 
 currentMonth = datetime.now().month
 currentYear = datetime.now().year
@@ -146,6 +159,65 @@ JSON_REPORTS_PATH.mkdir(parents=True, exist_ok=True)
 
 def script_path(name):
     return str(SCRIPTS_PATH / name)
+
+
+def run_transfer_script(script_name, label):
+    path = SCRIPTS_PATH / script_name
+    payload = {
+        "message": label,
+        "script": script_name,
+        "script_path": str(path),
+        "timestamp": datetime.now().isoformat()
+    }
+
+    if not path.exists():
+        payload.update({
+            "status": "script_missing",
+            "ok": False,
+            "error": f"Script not found at {path}"
+        })
+        print(f"ERROR: {payload['error']}", flush=True)
+        return payload
+
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(path)],
+            cwd=str(SCRIPTS_PATH),
+            capture_output=True,
+            text=True,
+            timeout=SCRIPT_RUN_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        payload.update({
+            "status": "script_timeout",
+            "ok": False,
+            "error": f"Script timed out after {SCRIPT_RUN_TIMEOUT} seconds",
+            "stdout": (exc.stdout or "")[-2000:],
+            "stderr": (exc.stderr or "")[-2000:]
+        })
+        print(f"ERROR: {label} timed out running {path}", flush=True)
+        return payload
+    except Exception as exc:
+        payload.update({
+            "status": "script_failed",
+            "ok": False,
+            "error": str(exc)
+        })
+        print(f"ERROR: {label} failed to start {path}: {exc}", flush=True)
+        return payload
+
+    payload.update({
+        "status": "script_ran" if result.returncode == 0 else "script_failed",
+        "ok": result.returncode == 0,
+        "returncode": result.returncode,
+        "stdout": (result.stdout or "")[-2000:],
+        "stderr": (result.stderr or "")[-2000:]
+    })
+    if result.returncode == 0:
+        print(f"Script completed: {label} ({path})", flush=True)
+    else:
+        print(f"ERROR: {label} exited {result.returncode}: {result.stderr}", flush=True)
+    return payload
 
 
 def sse_event(event, payload):
@@ -237,6 +309,30 @@ def auth_status():
     return auth_status_payload(force=force, check_mailbox=check_mailbox), 200
 
 
+@app.route("/transfer-status")
+def transfer_status():
+    scripts = []
+    for name in EXPECTED_TRANSFER_SCRIPTS:
+        path = SCRIPTS_PATH / name
+        scripts.append({
+            "name": name,
+            "path": str(path),
+            "exists": path.exists(),
+            "is_file": path.is_file()
+        })
+
+    return {
+        "status": "ok",
+        "mounts_root": str(MOUNTS_ROOT),
+        "mounts_root_exists": MOUNTS_ROOT.exists(),
+        "scripts_path": str(SCRIPTS_PATH),
+        "scripts_path_exists": SCRIPTS_PATH.exists(),
+        "script_run_timeout_seconds": SCRIPT_RUN_TIMEOUT,
+        "scripts": scripts,
+        "timestamp": datetime.now().isoformat()
+    }, 200
+
+
 @app.route("/stream-test")
 def stream_test():
     @stream_with_context
@@ -300,15 +396,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptUSEDFlash.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "Used Truck Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptUSEDFlash.sh", "Used Truck Flash Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "Freight Forecast OUTLOOK Report" in messagetocheck:
                         payload = {
@@ -318,15 +410,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptFREIGHTOUTLOOK.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "Freight Forecast OUTLOOK Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptFREIGHTOUTLOOK.sh", "Freight Forecast OUTLOOK Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
 
                     if "U.S. Trailer Flash" in messagetocheck:
@@ -337,15 +425,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptUSTrailer.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "U.S. Trailer Flash",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptUSTrailer.sh", "U.S. Trailer Flash")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "U.S. Used Truck Report" in messagetocheck:
                         payload = {
@@ -355,15 +439,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptUSED.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "U.S. Used Truck Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptUSED.sh", "U.S. Used Truck Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "SOI N.A. Classes 5-8 Vehicles Flash Report" in messagetocheck:
                         payload = {
@@ -373,15 +453,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptNAC58.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "SOI N.A. Classes 5-8 Vehicles Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptNAC58.sh", "SOI N.A. Classes 5-8 Vehicles Flash Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "Build & Retail Sales Flash Report" in messagetocheck:
                         payload = {
@@ -391,15 +467,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptNABURS.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "Build & Retail Sales Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptNABURS.sh", "Build & Retail Sales Flash Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "Complete BURS Report" in messagetocheck:
                         payload = {
@@ -409,15 +481,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptNACompleteBurs.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "Complete BURS Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptNACompleteBurs.sh", "Complete BURS Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "N.A. Commercial Vehicle OUTLOOK Report" in messagetocheck:
                         payload = {
@@ -427,15 +495,11 @@ def stream():
                         }
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        subprocess.run(["/bin/bash", script_path("MLPScriptNACVOUTLOOK.sh")])
-                        payload = {
-                            "status": "script_ran",
-                            "message": "N.A. Commercial Vehicle OUTLOOK Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        payload = run_transfer_script("MLPScriptNACVOUTLOOK.sh", "N.A. Commercial Vehicle OUTLOOK Report")
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if payload["ok"]:
+                            message.move(destination)
 
                     if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
                         payload = {
@@ -461,7 +525,7 @@ def stream():
                         time.sleep(5)
                         prelim_script_path = script_path("MLPScriptPrelim.sh")
                         try:
-                            subprocess.run(["/bin/bash", prelim_script_path], check=True)
+                            subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), timeout=SCRIPT_RUN_TIMEOUT)
                             print("✅ MLP Prelim Script Ran Successfully")
                             payload = {
                                 "status": "script_ran",
@@ -496,7 +560,7 @@ def stream():
                         print(f"✅ Email converted to JSON and saved at {json_file_path}")
                         prelim_script_path = script_path("MLPScriptPrelim.sh")
                         try:
-                            subprocess.run(["/bin/bash", prelim_script_path], check=True)
+                            subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), timeout=SCRIPT_RUN_TIMEOUT)
                             print("✅ MLP Trailer Prelim Script Ran Successfully")
                             payload = {
                                 "status": "script_ran",
