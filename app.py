@@ -1,5 +1,6 @@
 from O365 import Account, FileSystemTokenBackend, mailbox, MSGraphProtocol
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import datetime, timedelta
 from pathlib import Path
 import json
@@ -36,6 +37,7 @@ SCRIPTS_PATH = Path(os.getenv('SCRIPTS_PATH', str(MOUNTS_ROOT / 'mlp')))
 FLASK_HOST = os.getenv('FLASK_HOST', '0.0.0.0')
 FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
 AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL') or '300')
+O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
 
 O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
@@ -52,6 +54,7 @@ else:
     print("ERROR: O365_CLIENT_ID, O365_CLIENT_SECRET, and O365_TENANT_ID must be set", flush=True)
 
 auth_lock = threading.Lock()
+auth_executor = ThreadPoolExecutor(max_workers=1)
 last_auth_check = 0
 last_auth_ok = False
 last_auth_error = None
@@ -172,8 +175,13 @@ def ensure_authenticated(force=False):
 
         last_auth_check = now
         try:
-            last_auth_ok = bool(account.authenticate())
+            future = auth_executor.submit(account.authenticate)
+            last_auth_ok = bool(future.result(timeout=O365_AUTH_TIMEOUT))
             last_auth_error = None if last_auth_ok else "O365 authentication returned false"
+        except TimeoutError:
+            last_auth_ok = False
+            last_auth_error = f"O365 authentication timed out after {O365_AUTH_TIMEOUT} seconds"
+            print(f"ERROR: {last_auth_error}", flush=True)
         except Exception as exc:
             last_auth_ok = False
             last_auth_error = str(exc)
@@ -192,6 +200,7 @@ def auth_status_payload(force=False, check_mailbox=False):
         "completed_folder": COMPLETED_FOLDER,
         "token_path": str(TOKEN_PATH),
         "token_file_exists": (TOKEN_PATH / TOKEN_FILENAME).exists(),
+        "auth_timeout_seconds": O365_AUTH_TIMEOUT,
         "timestamp": datetime.now().isoformat()
     }
     if auth_error:
@@ -251,8 +260,14 @@ def stream_test():
 @app.route("/stream")
 def stream():
 
-    @stream_with_context
     def my_function():
+        payload = {
+            "status": "connected",
+            "message": "SSE stream connected",
+            "timestamp": datetime.now().isoformat()
+        }
+        yield sse_event("stream_status", payload)
+        sys.stdout.flush()
 
         while True:
             auth_payload = auth_status_payload()
@@ -527,7 +542,7 @@ def stream():
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no"
     }
-    return Response(safe_events(), mimetype='text/event-stream', headers=headers)
+    return Response(stream_with_context(safe_events()), mimetype='text/event-stream', headers=headers)
 
 @app.after_request
 def after_request(response):
