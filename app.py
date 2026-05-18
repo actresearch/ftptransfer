@@ -180,10 +180,51 @@ def script_path(name):
     return str(SCRIPTS_PATH / name)
 
 
+def transfer_output_summary(stdout, stderr):
+    output = "\n".join(value for value in (stdout or "", stderr or "") if value)
+    files_seen = []
+    successful = []
+    failed = []
+    no_files_found = "No files found to upload." in output
+
+    for raw_line in output.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("Uploading: "):
+            files_seen.append(line.removeprefix("Uploading: ").strip())
+        elif line.startswith("SUCCESS: ") and " uploaded successfully" in line:
+            file_path = line.removeprefix("SUCCESS: ").split(" uploaded successfully", 1)[0].strip()
+            successful.append(file_path)
+        elif line.startswith("ERROR: Failed to upload "):
+            file_path = line.removeprefix("ERROR: Failed to upload ").split(" (exit code:", 1)[0].strip()
+            failed.append(file_path)
+
+    if not files_seen and successful:
+        files_seen = successful
+
+    return {
+        "files_seen": files_seen,
+        "successful_transfers": successful,
+        "failed_transfers": failed,
+        "no_files_found": no_files_found
+    }
+
+
+def describe_files(file_paths, limit=3):
+    if not file_paths:
+        return ""
+
+    names = [Path(file_path).name for file_path in file_paths[:limit]]
+    suffix = "" if len(file_paths) <= limit else f", +{len(file_paths) - limit} more"
+    return ": " + ", ".join(names) + suffix
+
+
 def run_transfer_script(script_name, label):
     path = SCRIPTS_PATH / script_name
     payload = {
-        "message": label,
+        "message": f"Running transfer: {label}",
         "script": script_name,
         "script_path": str(path),
         "working_directory": str(SCRIPTS_PATH),
@@ -194,6 +235,7 @@ def run_transfer_script(script_name, label):
         payload.update({
             "status": "script_missing",
             "ok": False,
+            "message": f"Transfer script missing: {path}",
             "error": f"Script not found at {path}"
         })
         print(f"ERROR: {payload['error']}", flush=True)
@@ -208,12 +250,15 @@ def run_transfer_script(script_name, label):
             timeout=SCRIPT_RUN_TIMEOUT
         )
     except subprocess.TimeoutExpired as exc:
+        summary = transfer_output_summary(exc.stdout, exc.stderr)
         payload.update({
             "status": "script_timeout",
             "ok": False,
+            "message": f"Transfer timed out: {label}",
             "error": f"Script timed out after {SCRIPT_RUN_TIMEOUT} seconds",
             "stdout": (exc.stdout or "")[-2000:],
-            "stderr": (exc.stderr or "")[-2000:]
+            "stderr": (exc.stderr or "")[-2000:],
+            **summary
         })
         print(f"ERROR: {label} timed out running {path}", flush=True)
         return payload
@@ -221,17 +266,43 @@ def run_transfer_script(script_name, label):
         payload.update({
             "status": "script_failed",
             "ok": False,
+            "message": f"Transfer failed to start: {label}",
             "error": str(exc)
         })
         print(f"ERROR: {label} failed to start {path}: {exc}", flush=True)
         return payload
 
+    summary = transfer_output_summary(result.stdout, result.stderr)
+    if result.returncode == 0 and summary["failed_transfers"]:
+        status = "transfer_failed"
+        ok = False
+        message = f"Transfer finished with failed files: {label}"
+    elif result.returncode == 0 and summary["successful_transfers"]:
+        status = "transfer_success"
+        ok = True
+        count = len(summary["successful_transfers"])
+        message = f"Transfer successful: {label} ({count} file{'s' if count != 1 else ''}){describe_files(summary['successful_transfers'])}"
+    elif result.returncode == 0 and summary["no_files_found"]:
+        status = "no_files_found"
+        ok = True
+        message = f"No files found to transfer: {label}"
+    elif result.returncode == 0:
+        status = "script_ran"
+        ok = True
+        message = f"Transfer script completed: {label}"
+    else:
+        status = "script_failed"
+        ok = False
+        message = f"Transfer failed: {label}"
+
     payload.update({
-        "status": "script_ran" if result.returncode == 0 else "script_failed",
-        "ok": result.returncode == 0,
+        "status": status,
+        "ok": ok,
+        "message": message,
         "returncode": result.returncode,
         "stdout": (result.stdout or "")[-2000:],
         "stderr": (result.stderr or "")[-2000:],
+        **summary,
         "debug": {
             "command": f"/bin/bash {path}",
             "cwd": str(SCRIPTS_PATH),
@@ -295,7 +366,7 @@ def claim_message_lock(message, label):
 def move_message_to_completed(message, destination, label):
     payload = {
         "status": "message_moving",
-        "message": label,
+        "message": f"Moving processed email to {COMPLETED_FOLDER}: {label}",
         "destination": COMPLETED_FOLDER,
         "timestamp": datetime.now().isoformat()
     }
@@ -306,6 +377,7 @@ def move_message_to_completed(message, destination, label):
         payload.update({
             "status": "message_move_failed",
             "ok": False,
+            "message": f"Email move failed after transfer: {label}",
             "error": str(exc)
         })
         print(f"ERROR: failed to move {label} to {COMPLETED_FOLDER}: {exc}", flush=True)
@@ -313,7 +385,8 @@ def move_message_to_completed(message, destination, label):
 
     payload.update({
         "status": "message_moved",
-        "ok": True
+        "ok": True,
+        "message": f"Email moved to {COMPLETED_FOLDER}: {label}"
     })
     print(f"Moved message to {COMPLETED_FOLDER}: {label}", flush=True)
     return payload
@@ -352,7 +425,7 @@ def transfer_start_payload(label, script_name, subject):
     path = SCRIPTS_PATH / script_name
     return {
         "status": "script_starting",
-        "message": label,
+        "message": f"Transfer triggered: {label}",
         "subject": subject,
         "script": script_name,
         "script_path": str(path),
@@ -648,7 +721,7 @@ def stream():
                         print(f"✅ Email converted to JSON and saved at {json_file_path}")
                         payload = {
                             "status": "json_created",
-                            "message": "Email converted to JSON",
+                            "message": f"JSON created: {json_file_path.name}",
                             "eml_path": str(eml_path),
                             "json_file_path": str(json_file_path),
                             "timestamp": datetime.now().isoformat()
@@ -707,7 +780,7 @@ def stream():
                         json_file_path = convert_email_to_json(eml_path, "U.S. Trailer Prelim Net Orders ")
                         payload = {
                             "status": "json_created",
-                            "message": "Email converted to JSON",
+                            "message": f"JSON created: {json_file_path.name}",
                             "eml_path": str(eml_path),
                             "json_file_path": str(json_file_path),
                             "timestamp": datetime.now().isoformat()
