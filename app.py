@@ -6,6 +6,7 @@ from pathlib import Path
 import json
 import os
 import threading
+import hashlib
 from flask import Flask, Response, stream_with_context, request
 from flask_cors import CORS
 from flask_sse import sse
@@ -41,6 +42,7 @@ AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL') or '300')
 O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
 SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
+MESSAGE_LOCK_TTL = int(os.getenv('MESSAGE_LOCK_TTL') or '3600')
 
 O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
 
@@ -71,6 +73,22 @@ EXPECTED_TRANSFER_SCRIPTS = [
     "MLPScriptNACompleteBurs.sh",
     "MLPScriptNACVOUTLOOK.sh",
     "MLPScriptPrelim.sh",
+]
+
+TRANSFER_RULES = [
+    ("Used Truck Flash Report", "Used Truck Flash Report", "MLPScriptUSEDFlash.sh"),
+    ("Freight Forecast OUTLOOK Report", "Freight Forecast OUTLOOK Report", "MLPScriptFREIGHTOUTLOOK.sh"),
+    ("U.S. Trailer Flash", "U.S. Trailer Flash", "MLPScriptUSTrailer.sh"),
+    ("U.S. Used Truck Report", "U.S. Used Truck Report", "MLPScriptUSED.sh"),
+    ("SOI N.A. Classes 5-8 Vehicles Flash Report", "SOI N.A. Classes 5-8 Vehicles Flash Report", "MLPScriptNAC58.sh"),
+    ("Build & Retail Sales Flash Report", "Build & Retail Sales Flash Report", "MLPScriptNABURS.sh"),
+    ("Complete BURS Report", "Complete BURS Report", "MLPScriptNACompleteBurs.sh"),
+    ("N.A. Commercial Vehicle OUTLOOK Report", "N.A. Commercial Vehicle OUTLOOK Report", "MLPScriptNACVOUTLOOK.sh"),
+]
+
+PRELIM_RULES = [
+    ("Commercial Vehicle Preliminary Net Orders", "Commercial Vehicle Preliminary Net Orders", "Commercial Vehicle Preliminary Net Orders.eml"),
+    ("U.S. Trailer Prelim Net Orders", "U.S. Trailer Prelim Net Orders", "U.S. Trailer Prelim Net Orders.eml"),
 ]
 
 currentMonth = datetime.now().month
@@ -231,6 +249,74 @@ def run_transfer_script(script_name, label):
 
 def sse_event(event, payload):
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def message_lock_key(message, label):
+    candidates = [
+        getattr(message, "object_id", None),
+        getattr(message, "message_id", None),
+        getattr(message, "internet_message_id", None),
+        getattr(message, "conversation_id", None),
+        message_text(message),
+        label,
+    ]
+    raw = "|".join(str(value) for value in candidates if value)
+    return hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()
+
+
+def claim_message_lock(message, label):
+    lock_dir = MOUNTS_ROOT / ".ftptransfer-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{message_lock_key(message, label)}.lock"
+
+    if lock_path.exists():
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+            if age < MESSAGE_LOCK_TTL:
+                return None
+        except OSError:
+            return None
+
+        try:
+            lock_path.unlink()
+        except OSError:
+            return None
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+
+    with os.fdopen(fd, "w") as lock_file:
+        lock_file.write(datetime.now().isoformat())
+    return lock_path
+
+
+def move_message_to_completed(message, destination, label):
+    payload = {
+        "status": "message_moving",
+        "message": label,
+        "destination": COMPLETED_FOLDER,
+        "timestamp": datetime.now().isoformat()
+    }
+
+    try:
+        message.move(destination)
+    except Exception as exc:
+        payload.update({
+            "status": "message_move_failed",
+            "ok": False,
+            "error": str(exc)
+        })
+        print(f"ERROR: failed to move {label} to {COMPLETED_FOLDER}: {exc}", flush=True)
+        return payload
+
+    payload.update({
+        "status": "message_moved",
+        "ok": True
+    })
+    print(f"Moved message to {COMPLETED_FOLDER}: {label}", flush=True)
+    return payload
 
 
 def transfer_file_snapshot(limit=50):
@@ -436,6 +522,21 @@ def stream():
                 for message in inbox.get_messages(10):
                     messagetocheck = message_text(message)
                     print(f"Checking message: {messagetocheck}", flush=True)
+                    matching_label = None
+                    for trigger, label, _script_name in TRANSFER_RULES:
+                        if trigger in messagetocheck:
+                            matching_label = label
+                            break
+                    if matching_label is None:
+                        for trigger, label, _eml_filename in PRELIM_RULES:
+                            if trigger in messagetocheck:
+                                matching_label = label
+                                break
+                    if matching_label is None:
+                        continue
+                    if claim_message_lock(message, matching_label) is None:
+                        print(f"Skipping already-claimed message: {messagetocheck}", flush=True)
+                        continue
 
                     if "Used Truck Flash Report" in messagetocheck:
                         payload = transfer_start_payload("Used Truck Flash Report", "MLPScriptUSEDFlash.sh", messagetocheck)
@@ -445,7 +546,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "Freight Forecast OUTLOOK Report" in messagetocheck:
                         payload = transfer_start_payload("Freight Forecast OUTLOOK Report", "MLPScriptFREIGHTOUTLOOK.sh", messagetocheck)
@@ -455,7 +558,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
 
                     if "U.S. Trailer Flash" in messagetocheck:
@@ -466,7 +571,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "U.S. Used Truck Report" in messagetocheck:
                         payload = transfer_start_payload("U.S. Used Truck Report", "MLPScriptUSED.sh", messagetocheck)
@@ -476,7 +583,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "SOI N.A. Classes 5-8 Vehicles Flash Report" in messagetocheck:
                         payload = transfer_start_payload("SOI N.A. Classes 5-8 Vehicles Flash Report", "MLPScriptNAC58.sh", messagetocheck)
@@ -486,7 +595,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "Build & Retail Sales Flash Report" in messagetocheck:
                         payload = transfer_start_payload("Build & Retail Sales Flash Report", "MLPScriptNABURS.sh", messagetocheck)
@@ -496,7 +607,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "Complete BURS Report" in messagetocheck:
                         payload = transfer_start_payload("Complete BURS Report", "MLPScriptNACompleteBurs.sh", messagetocheck)
@@ -506,7 +619,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "N.A. Commercial Vehicle OUTLOOK Report" in messagetocheck:
                         payload = transfer_start_payload("N.A. Commercial Vehicle OUTLOOK Report", "MLPScriptNACVOUTLOOK.sh", messagetocheck)
@@ -516,7 +631,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if payload["ok"]:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
                         payload = transfer_start_payload("Commercial Vehicle Preliminary Net Orders", "MLPScriptPrelim.sh", messagetocheck)
@@ -574,7 +691,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if script_ok:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
 
                     if "U.S. Trailer Prelim Net Orders" in messagetocheck:
                         payload = transfer_start_payload("U.S. Trailer Prelim Net Orders", "MLPScriptPrelim.sh", messagetocheck)
@@ -632,7 +751,9 @@ def stream():
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         if script_ok:
-                            message.move(destination)
+                            payload = move_message_to_completed(message, destination, matching_label)
+                            yield sse_event("ftp_event", payload)
+                            sys.stdout.flush()
             else:
                 print(f"ERROR: O365 stream not authenticated: {auth_payload.get('message', 'Not Authenticated')}", flush=True)
                 yield sse_event("time", auth_payload)
