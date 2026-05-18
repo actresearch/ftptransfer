@@ -168,6 +168,7 @@ def run_transfer_script(script_name, label):
         "message": label,
         "script": script_name,
         "script_path": str(path),
+        "working_directory": str(SCRIPTS_PATH),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -212,7 +213,14 @@ def run_transfer_script(script_name, label):
         "ok": result.returncode == 0,
         "returncode": result.returncode,
         "stdout": (result.stdout or "")[-2000:],
-        "stderr": (result.stderr or "")[-2000:]
+        "stderr": (result.stderr or "")[-2000:],
+        "debug": {
+            "command": f"/bin/bash {path}",
+            "cwd": str(SCRIPTS_PATH),
+            "script_exists": path.exists(),
+            "script_is_file": path.is_file()
+        },
+        "visible_files_after_transfer": transfer_file_snapshot()
     })
     if result.returncode == 0:
         print(f"Script completed: {label} ({path})", flush=True)
@@ -223,6 +231,51 @@ def run_transfer_script(script_name, label):
 
 def sse_event(event, payload):
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
+
+
+def transfer_file_snapshot(limit=50):
+    files = []
+    if not SCRIPTS_PATH.exists():
+        return files
+
+    for path in SCRIPTS_PATH.iterdir():
+        if not path.is_file():
+            continue
+        try:
+            stat = path.stat()
+        except OSError as exc:
+            files.append({
+                "name": path.name,
+                "path": str(path),
+                "error": str(exc)
+            })
+            continue
+
+        files.append({
+            "name": path.name,
+            "path": str(path),
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+        })
+
+    files.sort(key=lambda item: item.get("modified", ""), reverse=True)
+    return files[:limit]
+
+
+def transfer_start_payload(label, script_name, subject):
+    path = SCRIPTS_PATH / script_name
+    return {
+        "status": "script_starting",
+        "message": label,
+        "subject": subject,
+        "script": script_name,
+        "script_path": str(path),
+        "working_directory": str(SCRIPTS_PATH),
+        "script_exists": path.exists(),
+        "script_is_file": path.is_file(),
+        "visible_files_before_transfer": transfer_file_snapshot(),
+        "timestamp": datetime.now().isoformat()
+    }
 
 
 def message_text(message):
@@ -383,20 +436,9 @@ def stream():
                 for message in inbox.get_messages(10):
                     messagetocheck = message_text(message)
                     print(f"Checking message: {messagetocheck}", flush=True)
-                    payload = {
-                        "status": "message_seen",
-                        "message": messagetocheck,
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    yield sse_event("ftp_event", payload)
-                    sys.stdout.flush()
 
                     if "Used Truck Flash Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "Used Truck Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("Used Truck Flash Report", "MLPScriptUSEDFlash.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptUSEDFlash.sh", "Used Truck Flash Report")
@@ -406,11 +448,7 @@ def stream():
                             message.move(destination)
 
                     if "Freight Forecast OUTLOOK Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "Freight Forecast OUTLOOK Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("Freight Forecast OUTLOOK Report", "MLPScriptFREIGHTOUTLOOK.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptFREIGHTOUTLOOK.sh", "Freight Forecast OUTLOOK Report")
@@ -421,11 +459,7 @@ def stream():
 
 
                     if "U.S. Trailer Flash" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "U.S. Trailer Flash",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("U.S. Trailer Flash", "MLPScriptUSTrailer.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptUSTrailer.sh", "U.S. Trailer Flash")
@@ -435,11 +469,7 @@ def stream():
                             message.move(destination)
 
                     if "U.S. Used Truck Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "U.S. Used Truck Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("U.S. Used Truck Report", "MLPScriptUSED.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptUSED.sh", "U.S. Used Truck Report")
@@ -449,11 +479,7 @@ def stream():
                             message.move(destination)
 
                     if "SOI N.A. Classes 5-8 Vehicles Flash Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "SOI N.A. Classes 5-8 Vehicles Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("SOI N.A. Classes 5-8 Vehicles Flash Report", "MLPScriptNAC58.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptNAC58.sh", "SOI N.A. Classes 5-8 Vehicles Flash Report")
@@ -463,11 +489,7 @@ def stream():
                             message.move(destination)
 
                     if "Build & Retail Sales Flash Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "Build & Retail Sales Flash Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("Build & Retail Sales Flash Report", "MLPScriptNABURS.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptNABURS.sh", "Build & Retail Sales Flash Report")
@@ -477,11 +499,7 @@ def stream():
                             message.move(destination)
 
                     if "Complete BURS Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "Complete BURS Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("Complete BURS Report", "MLPScriptNACompleteBurs.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptNACompleteBurs.sh", "Complete BURS Report")
@@ -491,11 +509,7 @@ def stream():
                             message.move(destination)
 
                     if "N.A. Commercial Vehicle OUTLOOK Report" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "N.A. Commercial Vehicle OUTLOOK Report",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("N.A. Commercial Vehicle OUTLOOK Report", "MLPScriptNACVOUTLOOK.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         payload = run_transfer_script("MLPScriptNACVOUTLOOK.sh", "N.A. Commercial Vehicle OUTLOOK Report")
@@ -505,11 +519,7 @@ def stream():
                             message.move(destination)
 
                     if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "Commercial Vehicle Preliminary Net Orders",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("Commercial Vehicle Preliminary Net Orders", "MLPScriptPrelim.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
@@ -520,38 +530,54 @@ def stream():
                         json_file_path = convert_email_to_json(eml_path, "Commercial Vehicle Preliminary Net Orders ")
                         print(f"✅ Email converted to JSON and saved at {json_file_path}")
                         payload = {
-                            "status": "script_ran",
+                            "status": "json_created",
                             "message": "Email converted to JSON",
+                            "eml_path": str(eml_path),
+                            "json_file_path": str(json_file_path),
                             "timestamp": datetime.now().isoformat()
                         }    
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        yield sse_event("ftp_event", payload)
                         time.sleep(5)
                         prelim_script_path = script_path("MLPScriptPrelim.sh")
+                        script_ok = False
                         try:
-                            subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), timeout=SCRIPT_RUN_TIMEOUT)
+                            result = subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), capture_output=True, text=True, timeout=SCRIPT_RUN_TIMEOUT)
+                            script_ok = True
                             print("✅ MLP Prelim Script Ran Successfully")
                             payload = {
                                 "status": "script_ran",
                                 "message": "Commercial Vehicle Preliminary Net Orders",
+                                "ok": True,
+                                "script": "MLPScriptPrelim.sh",
+                                "script_path": prelim_script_path,
+                                "working_directory": str(SCRIPTS_PATH),
+                                "stdout": (result.stdout or "")[-2000:],
+                                "stderr": (result.stderr or "")[-2000:],
+                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         except subprocess.CalledProcessError as e:
                             print(f"❌ ERROR: MLP Prelim Script Failed with error: {e}")
                             payload = {
-                                "status": "error",
+                                "status": "script_failed",
                                 "message": "ERROR: MLP Prelim Script Failed",
+                                "ok": False,
+                                "script": "MLPScriptPrelim.sh",
+                                "script_path": prelim_script_path,
+                                "working_directory": str(SCRIPTS_PATH),
+                                "returncode": e.returncode,
+                                "stdout": (e.stdout or "")[-2000:],
+                                "stderr": (e.stderr or "")[-2000:],
+                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if script_ok:
+                            message.move(destination)
 
                     if "U.S. Trailer Prelim Net Orders" in messagetocheck:
-                        payload = {
-                            "status": "script_starting",
-                            "message": "U.S. Trailer Prelim Net Orders",
-                            "timestamp": datetime.now().isoformat()
-                        }
+                        payload = transfer_start_payload("U.S. Trailer Prelim Net Orders", "MLPScriptPrelim.sh", messagetocheck)
                         yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
                         #this needs harcoded or set using above Path variable, also this needs to match JSON py directory for email location
@@ -560,26 +586,53 @@ def stream():
                         message.save_as_eml(to_path=eml_path)
                         time.sleep(5)
                         json_file_path = convert_email_to_json(eml_path, "U.S. Trailer Prelim Net Orders ")
+                        payload = {
+                            "status": "json_created",
+                            "message": "Email converted to JSON",
+                            "eml_path": str(eml_path),
+                            "json_file_path": str(json_file_path),
+                            "timestamp": datetime.now().isoformat()
+                        }
+                        yield sse_event("ftp_event", payload)
+                        time.sleep(5)
                         print(f"✅ Email converted to JSON and saved at {json_file_path}")
                         prelim_script_path = script_path("MLPScriptPrelim.sh")
+                        script_ok = False
                         try:
-                            subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), timeout=SCRIPT_RUN_TIMEOUT)
+                            result = subprocess.run(["/bin/bash", prelim_script_path], check=True, cwd=str(SCRIPTS_PATH), capture_output=True, text=True, timeout=SCRIPT_RUN_TIMEOUT)
+                            script_ok = True
                             print("✅ MLP Trailer Prelim Script Ran Successfully")
                             payload = {
                                 "status": "script_ran",
                                 "message": "U.S. Trailer Prelim Net Orders",
+                                "ok": True,
+                                "script": "MLPScriptPrelim.sh",
+                                "script_path": prelim_script_path,
+                                "working_directory": str(SCRIPTS_PATH),
+                                "stdout": (result.stdout or "")[-2000:],
+                                "stderr": (result.stderr or "")[-2000:],
+                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         except subprocess.CalledProcessError as e:
                             print(f"❌ ERROR: MLP Trailer Prelim Script Failed with error: {e}")
                             payload = {
-                                "status": "error",
+                                "status": "script_failed",
                                 "message": "ERROR: MLP Trailer Prelim Script Failed",
+                                "ok": False,
+                                "script": "MLPScriptPrelim.sh",
+                                "script_path": prelim_script_path,
+                                "working_directory": str(SCRIPTS_PATH),
+                                "returncode": e.returncode,
+                                "stdout": (e.stdout or "")[-2000:],
+                                "stderr": (e.stderr or "")[-2000:],
+                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
-                        yield f'event: ftp_event\ndata: {json.dumps(payload)}\n\n'
+                        yield sse_event("ftp_event", payload)
                         sys.stdout.flush()
-                        message.move(destination)
+                        if script_ok:
+                            message.move(destination)
             else:
                 print(f"ERROR: O365 stream not authenticated: {auth_payload.get('message', 'Not Authenticated')}", flush=True)
                 yield sse_event("time", auth_payload)
