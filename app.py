@@ -367,8 +367,7 @@ def run_transfer_script(script_name, label):
             "cwd": str(SCRIPTS_PATH),
             "script_exists": path.exists(),
             "script_is_file": path.is_file()
-        },
-        "visible_files_after_transfer": transfer_file_snapshot()
+        }
     })
     if result.returncode == 0:
         print(f"Script completed: {label} ({path})", flush=True)
@@ -483,6 +482,7 @@ def transfer_file_snapshot(limit=50):
 def transfer_start_payload(label, script_name, subject):
     path = SCRIPTS_PATH / script_name
     local_path = script_local_path(path)
+    local_root = Path(local_path) if local_path else None
     return {
         "status": "script_starting",
         "message": f"Transfer triggered: {label}",
@@ -490,11 +490,11 @@ def transfer_start_payload(label, script_name, subject):
         "script": script_name,
         "script_path": str(path),
         "search_path": local_path,
+        "search_path_exists": local_root.exists() if local_root else False,
         "candidate_files_before_transfer": recent_xlsx_snapshot(local_path),
         "working_directory": str(SCRIPTS_PATH),
         "script_exists": path.exists(),
         "script_is_file": path.is_file(),
-        "visible_files_before_transfer": transfer_file_snapshot(),
         "timestamp": datetime.now().isoformat()
     }
 
@@ -805,7 +805,6 @@ def stream():
                                 "working_directory": str(SCRIPTS_PATH),
                                 "stdout": (result.stdout or "")[-2000:],
                                 "stderr": (result.stderr or "")[-2000:],
-                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         except subprocess.CalledProcessError as e:
@@ -820,7 +819,6 @@ def stream():
                                 "returncode": e.returncode,
                                 "stdout": (e.stdout or "")[-2000:],
                                 "stderr": (e.stderr or "")[-2000:],
-                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         yield sse_event("ftp_event", payload)
@@ -865,7 +863,6 @@ def stream():
                                 "working_directory": str(SCRIPTS_PATH),
                                 "stdout": (result.stdout or "")[-2000:],
                                 "stderr": (result.stderr or "")[-2000:],
-                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         except subprocess.CalledProcessError as e:
@@ -880,7 +877,6 @@ def stream():
                                 "returncode": e.returncode,
                                 "stdout": (e.stdout or "")[-2000:],
                                 "stderr": (e.stderr or "")[-2000:],
-                                "visible_files_after_transfer": transfer_file_snapshot(),
                                 "timestamp": datetime.now().isoformat()
                             }
                         yield sse_event("ftp_event", payload)

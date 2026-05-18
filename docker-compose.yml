@@ -11,6 +11,8 @@ services:
       COMPLETED_FOLDER: ${COMPLETED_FOLDER:-CompletedAutomations}
       MOUNTS_ROOT: ${MOUNTS_ROOT:-/home/actserver/mounts}
       WREPORTS_ROOT: ${WREPORTS_ROOT:-/mnt/wreports}
+      ACT_PUBLISHED_REPORTS_ROOT: ${ACT_PUBLISHED_REPORTS_ROOT:-/mnt/ACT_Published_Reports}
+      VDATA_ROOT: ${VDATA_ROOT:-/mnt/vdata}
       TOKEN_PATH: ${TOKEN_PATH:-/home/actserver/mounts/token}
       TOKEN_FILENAME: ${TOKEN_FILENAME:-my_token.txt}
       JSON_REPORTS_PATH: ${JSON_REPORTS_PATH:-/home/actserver/mounts/json/Reports}
@@ -31,6 +33,8 @@ services:
     volumes:
       - ${MOUNTS_ROOT:-/home/actserver/mounts}:${MOUNTS_ROOT:-/home/actserver/mounts}
       - ${WREPORTS_ROOT:-/mnt/wreports}:/mnt/wreports
+      - ${ACT_PUBLISHED_REPORTS_ROOT:-/mnt/ACT_Published_Reports}:/mnt/ACT_Published_Reports
+      - ${VDATA_ROOT:-/mnt/vdata}:/mnt/vdata
     depends_on:
       redis:
         condition: service_healthy
