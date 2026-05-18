@@ -221,12 +221,70 @@ def describe_files(file_paths, limit=3):
     return ": " + ", ".join(names) + suffix
 
 
+def script_local_path(script_file):
+    try:
+        lines = script_file.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("LOCAL_PATH="):
+            continue
+
+        value = line.split("=", 1)[1].strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        return value or None
+
+    return None
+
+
+def recent_xlsx_snapshot(directory, days=7, limit=25):
+    if not directory:
+        return []
+
+    root = Path(directory)
+    if not root.exists():
+        return []
+
+    cutoff = time.time() - (days * 86400)
+    files = []
+    try:
+        candidates = root.rglob("*.xlsx")
+    except OSError:
+        return files
+
+    for path in candidates:
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+
+        if stat.st_mtime < cutoff:
+            continue
+
+        files.append({
+            "name": path.name,
+            "path": str(path),
+            "size": stat.st_size,
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat()
+        })
+
+    files.sort(key=lambda item: item["modified"], reverse=True)
+    return files[:limit]
+
+
 def run_transfer_script(script_name, label):
     path = SCRIPTS_PATH / script_name
+    local_path = script_local_path(path)
+    candidate_files = recent_xlsx_snapshot(local_path)
     payload = {
         "message": f"Running transfer: {label}",
         "script": script_name,
         "script_path": str(path),
+        "search_path": local_path,
+        "candidate_files_before_transfer": candidate_files,
         "working_directory": str(SCRIPTS_PATH),
         "timestamp": datetime.now().isoformat()
     }
@@ -282,10 +340,11 @@ def run_transfer_script(script_name, label):
         ok = True
         count = len(summary["successful_transfers"])
         message = f"Transfer successful: {label} ({count} file{'s' if count != 1 else ''}){describe_files(summary['successful_transfers'])}"
-    elif result.returncode == 0 and summary["no_files_found"]:
+    elif result.returncode == 0 and (summary["no_files_found"] or not summary["files_seen"]):
         status = "no_files_found"
         ok = True
-        message = f"No files found to transfer: {label}"
+        path_hint = f" in {local_path}" if local_path else ""
+        message = f"No files found to transfer: {label}{path_hint}"
     elif result.returncode == 0:
         status = "script_ran"
         ok = True
@@ -423,12 +482,15 @@ def transfer_file_snapshot(limit=50):
 
 def transfer_start_payload(label, script_name, subject):
     path = SCRIPTS_PATH / script_name
+    local_path = script_local_path(path)
     return {
         "status": "script_starting",
         "message": f"Transfer triggered: {label}",
         "subject": subject,
         "script": script_name,
         "script_path": str(path),
+        "search_path": local_path,
+        "candidate_files_before_transfer": recent_xlsx_snapshot(local_path),
         "working_directory": str(SCRIPTS_PATH),
         "script_exists": path.exists(),
         "script_is_file": path.is_file(),
