@@ -560,8 +560,11 @@ def auth_status_payload(force=False, check_mailbox=False):
             mailbox_obj.get_folder(folder_name=COMPLETED_FOLDER)
             payload["mailbox_ok"] = True
         except Exception as exc:
+            payload["status"] = "not_authenticated"
+            payload["authenticated"] = False
             payload["mailbox_ok"] = False
             payload["mailbox_error"] = str(exc)
+            payload["message"] = f"O365 mailbox check failed: {exc}"
             print(f"ERROR: O365 mailbox check failed: {exc}", flush=True)
 
     return payload
@@ -643,7 +646,7 @@ def stream():
         sys.stdout.flush()
 
         while True:
-            auth_payload = auth_status_payload()
+            auth_payload = auth_status_payload(check_mailbox=True)
             authenticated = auth_payload["authenticated"]
 
             if authenticated:
@@ -935,5 +938,4 @@ if __name__ == "__main__":
     # return "ran"
 
 # run_function() # start the timer
-
 
