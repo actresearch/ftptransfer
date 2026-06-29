@@ -570,6 +570,43 @@ def auth_status_payload(force=False, check_mailbox=False):
     return payload
 
 
+def connection_status_payload(force=False):
+    payload = auth_status_payload(force=force, check_mailbox=True)
+    payload["connection_ok"] = False
+    payload["connection_checks"] = {
+        "token": payload.get("authenticated", False),
+        "inbox_folder": False,
+        "completed_folder": payload.get("mailbox_ok", False),
+        "inbox_read": False,
+    }
+
+    if not payload.get("authenticated"):
+        payload["status"] = "connection_failed"
+        return payload
+
+    try:
+        mailbox_obj = account.mailbox(MAILBOX_USER)
+        inbox = mailbox_obj.inbox_folder()
+        payload["connection_checks"]["inbox_folder"] = True
+
+        # Force a small Graph read so this proves mailbox access, not just token creation.
+        messages = list(inbox.get_messages(1))
+        payload["connection_checks"]["inbox_read"] = True
+        payload["sample_message_available"] = bool(messages)
+
+        payload["status"] = "connected"
+        payload["connection_ok"] = True
+        payload["message"] = "O365 token, mailbox folders, and inbox read are working"
+    except Exception as exc:
+        payload["status"] = "connection_failed"
+        payload["authenticated"] = False
+        payload["connection_error"] = str(exc)
+        payload["message"] = f"O365 connection check failed: {exc}"
+        print(f"ERROR: O365 connection check failed: {exc}", flush=True)
+
+    return payload
+
+
 @app.route("/healthz")
 def healthz():
     payload = {
@@ -585,6 +622,12 @@ def auth_status():
     force = request.args.get("force") in ("1", "true", "yes")
     check_mailbox = request.args.get("mailbox") in ("1", "true", "yes")
     return auth_status_payload(force=force, check_mailbox=check_mailbox), 200
+
+
+@app.route("/connection-status")
+def connection_status():
+    force = request.args.get("force") in ("1", "true", "yes")
+    return connection_status_payload(force=force), 200
 
 
 @app.route("/transfer-status")
@@ -938,4 +981,3 @@ if __name__ == "__main__":
     # return "ran"
 
 # run_function() # start the timer
-
