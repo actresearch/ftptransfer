@@ -7,6 +7,7 @@ import json
 import os
 import threading
 import hashlib
+import socket
 from flask import Flask, Response, stream_with_context, request
 from flask_cors import CORS
 from flask_sse import sse
@@ -646,6 +647,40 @@ def connection_status_payload(force=False):
     return payload
 
 
+def dns_status_payload(hostname="login.microsoftonline.com"):
+    resolv_conf_path = Path("/etc/resolv.conf")
+    try:
+        resolv_conf = resolv_conf_path.read_text(errors="replace")
+    except OSError as exc:
+        resolv_conf = f"ERROR reading {resolv_conf_path}: {exc}"
+
+    payload = {
+        "status": "unknown",
+        "hostname": hostname,
+        "resolv_conf": resolv_conf,
+        "timestamp": datetime.now().isoformat()
+    }
+
+    try:
+        addresses = sorted({
+            item[4][0]
+            for item in socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        })
+        payload.update({
+            "status": "resolved",
+            "ok": True,
+            "addresses": addresses
+        })
+    except Exception as exc:
+        payload.update({
+            "status": "resolution_failed",
+            "ok": False,
+            "error": str(exc)
+        })
+
+    return payload
+
+
 @app.route("/healthz")
 def healthz():
     payload = {
@@ -667,6 +702,12 @@ def auth_status():
 def connection_status():
     force = request.args.get("force") in ("1", "true", "yes")
     return connection_status_payload(force=force), 200
+
+
+@app.route("/dns-status")
+def dns_status():
+    hostname = request.args.get("host") or "login.microsoftonline.com"
+    return dns_status_payload(hostname=hostname), 200
 
 
 @app.route("/transfer-status")
@@ -869,6 +910,7 @@ def start_background_poller():
     if not BACKGROUND_POLL_ENABLED:
         print("Background mailbox poller disabled by BACKGROUND_POLL_ENABLED", flush=True)
         return
+    print(f"DNS startup status: {json.dumps(dns_status_payload())}", flush=True)
     thread = threading.Thread(target=background_poll_loop, name="ftptransfer-mailbox-poller", daemon=True)
     thread.start()
 
