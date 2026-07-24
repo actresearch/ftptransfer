@@ -46,10 +46,66 @@ SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
 MESSAGE_LOCK_TTL = int(os.getenv('MESSAGE_LOCK_TTL') or '30')
 BACKGROUND_POLL_ENABLED = os.getenv('BACKGROUND_POLL_ENABLED', 'true').lower() not in ('0', 'false', 'no')
 BACKGROUND_POLL_LOCK_TTL = max(STREAM_POLL_INTERVAL * 2, 120)
+CONTAINER_DNS_REPAIR_ENABLED = os.getenv('CONTAINER_DNS_REPAIR_ENABLED', 'true').lower() not in ('0', 'false', 'no')
+CONTAINER_DNS_NAMESERVERS = [
+    value.strip()
+    for value in os.getenv('CONTAINER_DNS_NAMESERVERS', '1.1.1.1,8.8.8.8').split(',')
+    if value.strip()
+]
 
 O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
 
 credentials = (CLIENT_ID, CLIENT_SECRET)
+
+
+def hostname_resolves(hostname):
+    try:
+        socket.getaddrinfo(hostname, 443, type=socket.SOCK_STREAM)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+def repair_container_dns_if_needed(hostname="login.microsoftonline.com"):
+    if not CONTAINER_DNS_REPAIR_ENABLED:
+        print("Container DNS repair disabled by CONTAINER_DNS_REPAIR_ENABLED", flush=True)
+        return
+
+    resolves, error = hostname_resolves(hostname)
+    if resolves:
+        return
+
+    if not CONTAINER_DNS_NAMESERVERS:
+        print(f"ERROR: DNS repair skipped; no CONTAINER_DNS_NAMESERVERS configured. Initial error: {error}", flush=True)
+        return
+
+    resolv_conf = Path("/etc/resolv.conf")
+    contents = "\n".join(f"nameserver {nameserver}" for nameserver in CONTAINER_DNS_NAMESERVERS)
+    contents += "\noptions timeout:2 attempts:3\n"
+
+    try:
+        before = resolv_conf.read_text(errors="replace")
+        resolv_conf.write_text(contents)
+    except OSError as exc:
+        print(f"ERROR: DNS repair failed writing {resolv_conf}: {exc}. Initial error: {error}", flush=True)
+        return
+
+    resolves, repaired_error = hostname_resolves(hostname)
+    if resolves:
+        print(
+            f"Container DNS repaired for {hostname}; nameservers={CONTAINER_DNS_NAMESERVERS}; previous_resolv_conf={before!r}",
+            flush=True
+        )
+    else:
+        print(
+            f"ERROR: DNS repair did not resolve {hostname}; nameservers={CONTAINER_DNS_NAMESERVERS}; "
+            f"initial_error={error}; repaired_error={repaired_error}; previous_resolv_conf={before!r}",
+            flush=True
+        )
+
+
+repair_container_dns_if_needed()
+
 
 # the default protocol will be Microsoft Graph
 token_backend = FileSystemTokenBackend(token_path=str(TOKEN_PATH), token_filename=TOKEN_FILENAME)
