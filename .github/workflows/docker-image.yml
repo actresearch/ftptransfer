@@ -36,10 +36,28 @@ jobs:
             type=ref,event=branch
             type=sha
 
-      - name: Build and push image
+      - name: Build image
         uses: docker/build-push-action@v6
         with:
           context: .
-          push: true
+          load: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          sbom: false
+
+      - name: Push image tags
+        shell: bash
+        run: |
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            for attempt in 1 2 3; do
+              if docker push "$tag"; then
+                break
+              fi
+              if [ "$attempt" -eq 3 ]; then
+                exit 1
+              fi
+              sleep 10
+            done
+          done <<< "${{ steps.meta.outputs.tags }}"
