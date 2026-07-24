@@ -49,7 +49,7 @@ BACKGROUND_POLL_LOCK_TTL = max(STREAM_POLL_INTERVAL * 2, 120)
 CONTAINER_DNS_REPAIR_ENABLED = os.getenv('CONTAINER_DNS_REPAIR_ENABLED', 'true').lower() not in ('0', 'false', 'no')
 CONTAINER_DNS_NAMESERVERS = [
     value.strip()
-    for value in os.getenv('CONTAINER_DNS_NAMESERVERS', '1.1.1.1,8.8.8.8').split(',')
+    for value in os.getenv('CONTAINER_DNS_NAMESERVERS', '192.168.1.1').split(',')
     if value.strip()
 ]
 
