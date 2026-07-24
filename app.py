@@ -43,6 +43,8 @@ O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
 SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
 MESSAGE_LOCK_TTL = int(os.getenv('MESSAGE_LOCK_TTL') or '30')
+BACKGROUND_POLL_ENABLED = os.getenv('BACKGROUND_POLL_ENABLED', 'true').lower() not in ('0', 'false', 'no')
+BACKGROUND_POLL_LOCK_TTL = max(STREAM_POLL_INTERVAL * 2, 120)
 
 O365_CONFIGURED = bool(CLIENT_ID and CLIENT_SECRET and TENANT_ID)
 
@@ -421,6 +423,43 @@ def claim_message_lock(message, label):
     return lock_path
 
 
+def claim_named_lock(name, ttl_seconds):
+    lock_dir = MOUNTS_ROOT / ".ftptransfer-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = lock_dir / f"{name}.lock"
+
+    if lock_path.exists():
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+            if age < ttl_seconds:
+                return None
+        except OSError:
+            return None
+
+        try:
+            lock_path.unlink()
+        except OSError:
+            return None
+
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+
+    with os.fdopen(fd, "w") as lock_file:
+        lock_file.write(datetime.now().isoformat())
+    return lock_path
+
+
+def release_named_lock(lock_path):
+    if lock_path is None:
+        return
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
 def move_message_to_completed(message, destination, label):
     payload = {
         "status": "message_moving",
@@ -656,6 +695,184 @@ def transfer_status():
     }, 200
 
 
+def emit_noop(_event, _payload):
+    return None
+
+
+def emit_sse(event, payload):
+    return sse_event(event, payload)
+
+
+def matching_message_label(messagetocheck):
+    for trigger, label, _script_name in TRANSFER_RULES:
+        if trigger in messagetocheck:
+            return label
+    for trigger, label, _eml_filename in PRELIM_RULES:
+        if trigger in messagetocheck:
+            return label
+    return None
+
+
+def process_standard_transfer(message, destination, messagetocheck, matching_label, label, script_name, emit):
+    payload = transfer_start_payload(label, script_name, messagetocheck)
+    yield emit("ftp_event", payload)
+    payload = run_transfer_script(script_name, label)
+    yield emit("ftp_event", payload)
+    if payload["ok"]:
+        payload = move_message_to_completed(message, destination, matching_label)
+        yield emit("ftp_event", payload)
+
+
+def process_prelim_transfer(message, destination, messagetocheck, matching_label, label, eml_filename, base_file_name, emit):
+    payload = transfer_start_payload(label, "MLPScriptPrelim.sh", messagetocheck)
+    yield emit("ftp_event", payload)
+
+    eml_path = PRELIMS_PATH / eml_filename
+    eml_path.parent.mkdir(parents=True, exist_ok=True)
+    message.save_as_eml(to_path=eml_path)
+    time.sleep(5)
+    json_file_path = convert_email_to_json(eml_path, base_file_name)
+    print(f"Email converted to JSON and saved at {json_file_path}", flush=True)
+    payload = {
+        "status": "json_created",
+        "message": f"JSON created: {json_file_path.name}",
+        "eml_path": str(eml_path),
+        "json_file_path": str(json_file_path),
+        "timestamp": datetime.now().isoformat()
+    }
+    yield emit("ftp_event", payload)
+    time.sleep(5)
+
+    prelim_script_path = script_path("MLPScriptPrelim.sh")
+    script_ok = False
+    try:
+        result = subprocess.run(
+            ["/bin/bash", prelim_script_path],
+            check=True,
+            cwd=str(SCRIPTS_PATH),
+            capture_output=True,
+            text=True,
+            timeout=SCRIPT_RUN_TIMEOUT
+        )
+        script_ok = True
+        print(f"MLP prelim script ran successfully: {label}", flush=True)
+        payload = {
+            "status": "script_ran",
+            "message": label,
+            "ok": True,
+            "script": "MLPScriptPrelim.sh",
+            "script_path": prelim_script_path,
+            "working_directory": str(SCRIPTS_PATH),
+            "stdout": (result.stdout or "")[-2000:],
+            "stderr": (result.stderr or "")[-2000:],
+            "timestamp": datetime.now().isoformat()
+        }
+    except subprocess.CalledProcessError as e:
+        print(f"ERROR: MLP prelim script failed for {label}: {e}", flush=True)
+        payload = {
+            "status": "script_failed",
+            "message": f"ERROR: MLP prelim script failed: {label}",
+            "ok": False,
+            "script": "MLPScriptPrelim.sh",
+            "script_path": prelim_script_path,
+            "working_directory": str(SCRIPTS_PATH),
+            "returncode": e.returncode,
+            "stdout": (e.stdout or "")[-2000:],
+            "stderr": (e.stderr or "")[-2000:],
+            "timestamp": datetime.now().isoformat()
+        }
+    yield emit("ftp_event", payload)
+    if script_ok:
+        payload = move_message_to_completed(message, destination, matching_label)
+        yield emit("ftp_event", payload)
+
+
+def poll_mailbox_once(emit=emit_noop):
+    auth_payload = auth_status_payload(check_mailbox=True)
+    authenticated = auth_payload["authenticated"]
+
+    if not authenticated:
+        print(f"ERROR: O365 poll not authenticated: {auth_payload.get('message', 'Not Authenticated')}", flush=True)
+        yield emit("time", auth_payload)
+        yield emit("ftp_event", auth_payload)
+        return
+
+    yield emit("time", auth_payload)
+
+    mailbox_obj = account.mailbox(MAILBOX_USER)
+    inbox = mailbox_obj.inbox_folder()
+    destination = mailbox_obj.get_folder(folder_name=COMPLETED_FOLDER)
+
+    for message in inbox.get_messages(10):
+        messagetocheck = message_text(message)
+        print(f"Checking message: {messagetocheck}", flush=True)
+        matching_label = matching_message_label(messagetocheck)
+        if matching_label is None:
+            continue
+        if claim_message_lock(message, matching_label) is None:
+            print(f"Skipping already-claimed message: {messagetocheck}", flush=True)
+            continue
+
+        for trigger, label, script_name in TRANSFER_RULES:
+            if trigger in messagetocheck:
+                yield from process_standard_transfer(
+                    message, destination, messagetocheck, matching_label, label, script_name, emit
+                )
+
+        if "Commercial Vehicle Preliminary Net Orders" in messagetocheck:
+            yield from process_prelim_transfer(
+                message,
+                destination,
+                messagetocheck,
+                matching_label,
+                "Commercial Vehicle Preliminary Net Orders",
+                "Commercial Vehicle Preliminary Net Orders.eml",
+                "Commercial Vehicle Preliminary Net Orders ",
+                emit
+            )
+
+        if "U.S. Trailer Prelim Net Orders" in messagetocheck:
+            yield from process_prelim_transfer(
+                message,
+                destination,
+                messagetocheck,
+                matching_label,
+                "U.S. Trailer Prelim Net Orders",
+                "U.S. Trailer Prelim Net Orders.eml",
+                "U.S. Trailer Prelim Net Orders ",
+                emit
+            )
+
+
+def background_poll_loop():
+    print(
+        f"Background mailbox poller started; interval={STREAM_POLL_INTERVAL}s mailbox={MAILBOX_USER}",
+        flush=True
+    )
+    while True:
+        lock_path = claim_named_lock("background-poller", BACKGROUND_POLL_LOCK_TTL)
+        if lock_path is not None:
+            try:
+                for _event in poll_mailbox_once():
+                    pass
+                print(f"Background mailbox poll completed at {datetime.now().isoformat()}", flush=True)
+                time.sleep(STREAM_POLL_INTERVAL)
+            except Exception as exc:
+                print(f"ERROR: background poll failed: {exc}", flush=True)
+            finally:
+                release_named_lock(lock_path)
+        else:
+            time.sleep(STREAM_POLL_INTERVAL)
+
+
+def start_background_poller():
+    if not BACKGROUND_POLL_ENABLED:
+        print("Background mailbox poller disabled by BACKGROUND_POLL_ENABLED", flush=True)
+        return
+    thread = threading.Thread(target=background_poll_loop, name="ftptransfer-mailbox-poller", daemon=True)
+    thread.start()
+
+
 @app.route("/stream-test")
 def stream_test():
     @stream_with_context
@@ -676,8 +893,8 @@ def stream_test():
     }
     return Response(test_events(), mimetype='text/event-stream', headers=headers)
 
-@app.route("/stream")
-def stream():
+@app.route("/stream-legacy")
+def stream_legacy():
 
     def my_function():
         payload = {
@@ -961,6 +1178,63 @@ def stream():
         "X-Accel-Buffering": "no"
     }
     return Response(stream_with_context(safe_events()), mimetype='text/event-stream', headers=headers)
+
+
+@app.route("/stream")
+def stream():
+
+    def events():
+        payload = {
+            "status": "connected",
+            "message": "SSE stream connected",
+            "timestamp": datetime.now().isoformat()
+        }
+        yield sse_event("stream_status", payload)
+        sys.stdout.flush()
+
+        while True:
+            try:
+                for event in poll_mailbox_once(emit_sse):
+                    if event:
+                        yield event
+                        sys.stdout.flush()
+            except GeneratorExit:
+                raise
+            except Exception as exc:
+                print(f"ERROR: stream failed: {exc}", flush=True)
+                payload = {
+                    "status": "error",
+                    "message": str(exc),
+                    "timestamp": datetime.now().isoformat()
+                }
+                yield sse_event("stream_error", payload)
+                sys.stdout.flush()
+            time.sleep(STREAM_POLL_INTERVAL)
+
+    headers = {
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive",
+        "X-Accel-Buffering": "no"
+    }
+    return Response(stream_with_context(events()), mimetype='text/event-stream', headers=headers)
+
+
+@app.route("/poller-status")
+def poller_status():
+    lock_path = MOUNTS_ROOT / ".ftptransfer-locks" / "background-poller.lock"
+    return {
+        "status": "ok",
+        "background_poll_enabled": BACKGROUND_POLL_ENABLED,
+        "stream_poll_interval_seconds": STREAM_POLL_INTERVAL,
+        "background_poll_lock_ttl_seconds": BACKGROUND_POLL_LOCK_TTL,
+        "background_lock_exists": lock_path.exists(),
+        "background_lock_path": str(lock_path),
+        "timestamp": datetime.now().isoformat()
+    }, 200
+
+
+start_background_poller()
+
 
 @app.after_request
 def after_request(response):
