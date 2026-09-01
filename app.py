@@ -44,6 +44,7 @@ O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
 SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
 MESSAGE_LOCK_TTL = int(os.getenv('MESSAGE_LOCK_TTL') or '30')
+FTP_STATUS_TOKEN = os.getenv('FTP_STATUS_TOKEN', '')
 BACKGROUND_POLL_ENABLED = os.getenv('BACKGROUND_POLL_ENABLED', 'true').lower() not in ('0', 'false', 'no')
 BACKGROUND_POLL_LOCK_TTL = max(STREAM_POLL_INTERVAL * 2, 120)
 CONTAINER_DNS_REPAIR_ENABLED = os.getenv('CONTAINER_DNS_REPAIR_ENABLED', 'true').lower() not in ('0', 'false', 'no')
@@ -121,6 +122,18 @@ auth_executor = ThreadPoolExecutor(max_workers=1)
 last_auth_check = 0
 last_auth_ok = False
 last_auth_error = None
+service_state_lock = threading.Lock()
+service_state = {
+    "last_stream_heartbeat": None,
+    "last_poll_started": None,
+    "last_poll_completed": None,
+    "last_poll_status": None,
+    "last_poll_message": None,
+    "last_matching_email": None,
+    "last_transfer_success": None,
+    "last_transfer_error": None,
+    "recent_events": [],
+}
 
 EXPECTED_TRANSFER_SCRIPTS = [
     "MLPScriptUSEDFlash.sh",
@@ -439,6 +452,101 @@ def sse_event(event, payload):
     return f"event: {event}\ndata: {json.dumps(payload)}\n\n"
 
 
+def timestamp_now():
+    return datetime.now().isoformat()
+
+
+def message_received_timestamp(message):
+    for attr in ("received", "received_date_time", "created", "sent"):
+        value = getattr(message, attr, None)
+        if value:
+            return str(value)
+    return ""
+
+
+def email_summary(message, label):
+    return {
+        "subject": message_text(message),
+        "sender": str(getattr(message, "sender", "") or getattr(message, "from_", "") or ""),
+        "received_at": message_received_timestamp(message),
+        "label": label,
+    }
+
+
+def record_service_event(event, payload):
+    if not isinstance(payload, dict):
+        return
+
+    status = str(payload.get("status") or event or "event")
+    timestamp = payload.get("timestamp") or timestamp_now()
+    summary = {
+        "event": event,
+        "status": status,
+        "message": payload.get("message") or status,
+        "timestamp": timestamp,
+    }
+
+    with service_state_lock:
+        service_state["recent_events"].insert(0, summary)
+        service_state["recent_events"] = service_state["recent_events"][:25]
+
+        if status in {"stream_connected", "connected", "stream_heartbeat"}:
+            service_state["last_stream_heartbeat"] = timestamp
+        if status == "poll_started":
+            service_state["last_poll_started"] = timestamp
+        if status in {"poll_completed", "no_matching_messages"}:
+            service_state["last_poll_completed"] = timestamp
+            service_state["last_poll_status"] = status
+            service_state["last_poll_message"] = payload.get("message") or status
+        if status in {"transfer_success", "script_ran", "message_moved", "poll_completed"} and payload.get("ok") is not False:
+            service_state["last_transfer_success"] = timestamp
+        if status in {"not_authenticated", "connection_failed", "script_failed", "script_timeout", "transfer_failed", "error"}:
+            service_state["last_transfer_error"] = {
+                "timestamp": timestamp,
+                "status": status,
+                "message": payload.get("message") or payload.get("error") or status,
+            }
+        if isinstance(payload.get("email"), dict):
+            service_state["last_matching_email"] = payload["email"]
+
+
+def emit_recorded_sse(event, payload):
+    record_service_event(event, payload)
+    return sse_event(event, payload)
+
+
+def service_status_payload():
+    auth_payload = auth_status_payload(check_mailbox=False)
+    with service_state_lock:
+        snapshot = json.loads(json.dumps(service_state))
+    return {
+        "status": "ok" if auth_payload.get("authenticated") else "not_authenticated",
+        "authenticated": auth_payload.get("authenticated", False),
+        "mailbox_user": MAILBOX_USER,
+        "completed_folder": COMPLETED_FOLDER,
+        "stream_poll_interval_seconds": STREAM_POLL_INTERVAL,
+        "background_poll_enabled": BACKGROUND_POLL_ENABLED,
+        "latest_email": snapshot.get("last_matching_email") or {},
+        "last_poll_started": snapshot.get("last_poll_started"),
+        "last_poll_completed": snapshot.get("last_poll_completed"),
+        "last_poll_status": snapshot.get("last_poll_status"),
+        "last_poll_message": snapshot.get("last_poll_message"),
+        "last_transfer_success": snapshot.get("last_transfer_success"),
+        "last_transfer_error": snapshot.get("last_transfer_error"),
+        "last_stream_heartbeat": snapshot.get("last_stream_heartbeat"),
+        "recent_events": snapshot.get("recent_events", [])[:25],
+        "timestamp": timestamp_now(),
+    }
+
+
+def status_token_authorized():
+    if not FTP_STATUS_TOKEN:
+        return False
+    provided = request.headers.get("X-FTP-Status-Token", "")
+    auth_header = request.headers.get("Authorization", "")
+    return provided == FTP_STATUS_TOKEN or auth_header == f"Bearer {FTP_STATUS_TOKEN}"
+
+
 def message_lock_key(message, label):
     candidates = [
         getattr(message, "object_id", None),
@@ -583,6 +691,10 @@ def transfer_start_payload(label, script_name, subject):
         "status": "script_starting",
         "message": f"Transfer triggered: {label}",
         "subject": subject,
+        "email": {
+            "subject": subject,
+            "label": label,
+        },
         "script": script_name,
         "script_path": str(path),
         "search_path": local_path,
@@ -792,12 +904,24 @@ def transfer_status():
     }, 200
 
 
+@app.route("/status")
+def status():
+    if not status_token_authorized():
+        return {
+            "status": "unauthorized",
+            "message": "FTP_STATUS_TOKEN is required for service status.",
+            "timestamp": timestamp_now(),
+        }, 401
+    return service_status_payload(), 200
+
+
 def emit_noop(_event, _payload):
+    record_service_event(_event, _payload)
     return None
 
 
 def emit_sse(event, payload):
-    return sse_event(event, payload)
+    return emit_recorded_sse(event, payload)
 
 
 def matching_message_label(messagetocheck):
@@ -885,6 +1009,12 @@ def process_prelim_transfer(message, destination, messagetocheck, matching_label
 
 
 def poll_mailbox_once(emit=emit_noop):
+    yield emit("ftp_event", {
+        "status": "poll_started",
+        "message": "Mailbox poll started",
+        "timestamp": timestamp_now(),
+    })
+
     auth_payload = auth_status_payload(check_mailbox=True)
     authenticated = auth_payload["authenticated"]
 
@@ -899,16 +1029,28 @@ def poll_mailbox_once(emit=emit_noop):
     mailbox_obj = account.mailbox(MAILBOX_USER)
     inbox = mailbox_obj.inbox_folder()
     destination = mailbox_obj.get_folder(folder_name=COMPLETED_FOLDER)
+    messages_checked = 0
+    matching_messages = 0
+    claimed_messages = 0
 
     for message in inbox.get_messages(10):
+        messages_checked += 1
         messagetocheck = message_text(message)
         print(f"Checking message: {messagetocheck}", flush=True)
         matching_label = matching_message_label(messagetocheck)
         if matching_label is None:
             continue
+        matching_messages += 1
+        yield emit("ftp_event", {
+            "status": "matching_email_seen",
+            "message": f"Matching email observed: {matching_label}",
+            "email": email_summary(message, matching_label),
+            "timestamp": timestamp_now(),
+        })
         if claim_message_lock(message, matching_label) is None:
             print(f"Skipping already-claimed message: {messagetocheck}", flush=True)
             continue
+        claimed_messages += 1
 
         for trigger, label, script_name in TRANSFER_RULES:
             if trigger in messagetocheck:
@@ -939,6 +1081,25 @@ def poll_mailbox_once(emit=emit_noop):
                 "U.S. Trailer Prelim Net Orders ",
                 emit
             )
+
+    if matching_messages == 0:
+        yield emit("ftp_event", {
+            "status": "no_matching_messages",
+            "ok": True,
+            "message": "Mailbox poll completed with no matching emails",
+            "messages_checked": messages_checked,
+            "timestamp": timestamp_now(),
+        })
+
+    yield emit("ftp_event", {
+        "status": "poll_completed",
+        "ok": True,
+        "message": "Mailbox poll completed",
+        "messages_checked": messages_checked,
+        "matching_messages": matching_messages,
+        "claimed_messages": claimed_messages,
+        "timestamp": timestamp_now(),
+    })
 
 
 def background_poll_loop():
@@ -1000,7 +1161,7 @@ def stream_legacy():
             "message": "SSE stream connected",
             "timestamp": datetime.now().isoformat()
         }
-        yield sse_event("stream_status", payload)
+        yield emit_sse("stream_status", payload)
         sys.stdout.flush()
 
         while True:
@@ -1292,6 +1453,13 @@ def stream():
 
         while True:
             try:
+                heartbeat_payload = {
+                    "status": "stream_heartbeat",
+                    "message": "FTP stream heartbeat",
+                    "timestamp": timestamp_now(),
+                }
+                yield emit_sse("heartbeat", heartbeat_payload)
+                sys.stdout.flush()
                 for event in poll_mailbox_once(emit_sse):
                     if event:
                         yield event
@@ -1305,8 +1473,15 @@ def stream():
                     "message": str(exc),
                     "timestamp": datetime.now().isoformat()
                 }
-                yield sse_event("stream_error", payload)
+                yield emit_sse("stream_error", payload)
                 sys.stdout.flush()
+            heartbeat_payload = {
+                "status": "stream_heartbeat",
+                "message": "FTP stream heartbeat",
+                "timestamp": timestamp_now(),
+            }
+            yield emit_sse("heartbeat", heartbeat_payload)
+            sys.stdout.flush()
             time.sleep(STREAM_POLL_INTERVAL)
 
     headers = {
