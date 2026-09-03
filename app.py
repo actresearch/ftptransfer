@@ -42,9 +42,14 @@ FLASK_PORT = int(os.getenv('FLASK_PORT', '5000'))
 AUTH_CHECK_INTERVAL = int(os.getenv('AUTH_CHECK_INTERVAL') or '300')
 O365_AUTH_TIMEOUT = int(os.getenv('O365_AUTH_TIMEOUT') or '20')
 STREAM_POLL_INTERVAL = int(os.getenv('STREAM_POLL_INTERVAL') or '60')
+POLL_ERROR_BACKOFF_SECONDS = max(
+    STREAM_POLL_INTERVAL,
+    int(os.getenv('POLL_ERROR_BACKOFF_SECONDS') or '60'),
+)
 SCRIPT_RUN_TIMEOUT = int(os.getenv('SCRIPT_RUN_TIMEOUT') or '900')
 MESSAGE_LOCK_TTL = int(os.getenv('MESSAGE_LOCK_TTL') or '30')
 FTP_STATUS_TOKEN = os.getenv('FTP_STATUS_TOKEN', '')
+FTP_STATE_PATH = Path(os.getenv('FTP_STATE_PATH', str(MOUNTS_ROOT / '.ftptransfer-state.json')))
 BACKGROUND_POLL_ENABLED = os.getenv('BACKGROUND_POLL_ENABLED', 'true').lower() not in ('0', 'false', 'no')
 BACKGROUND_POLL_LOCK_TTL = max(STREAM_POLL_INTERVAL * 2, 120)
 CONTAINER_DNS_REPAIR_ENABLED = os.getenv('CONTAINER_DNS_REPAIR_ENABLED', 'true').lower() not in ('0', 'false', 'no')
@@ -129,11 +134,37 @@ service_state = {
     "last_poll_completed": None,
     "last_poll_status": None,
     "last_poll_message": None,
+    "last_poll_success": None,
     "last_matching_email": None,
     "last_transfer_success": None,
     "last_transfer_error": None,
     "recent_events": [],
 }
+
+
+def load_service_state():
+    try:
+        payload = json.loads(FTP_STATE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(payload, dict):
+        return
+    for key in service_state:
+        if key in payload:
+            service_state[key] = payload[key]
+
+
+def persist_service_state(snapshot):
+    try:
+        FTP_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = FTP_STATE_PATH.with_suffix(f"{FTP_STATE_PATH.suffix}.tmp")
+        temporary_path.write_text(json.dumps(snapshot), encoding="utf-8")
+        temporary_path.replace(FTP_STATE_PATH)
+    except OSError as exc:
+        print(f"ERROR: unable to persist FTP service state: {exc}", flush=True)
+
+
+load_service_state()
 
 EXPECTED_TRANSFER_SCRIPTS = [
     "MLPScriptUSEDFlash.sh",
@@ -498,7 +529,8 @@ def record_service_event(event, payload):
             service_state["last_poll_completed"] = timestamp
             service_state["last_poll_status"] = status
             service_state["last_poll_message"] = payload.get("message") or status
-        if status in {"transfer_success", "script_ran", "message_moved", "poll_completed"} and payload.get("ok") is not False:
+            service_state["last_poll_success"] = timestamp
+        if status in {"transfer_success", "script_ran", "message_moved"} and payload.get("ok") is not False:
             service_state["last_transfer_success"] = timestamp
         if status in {"not_authenticated", "connection_failed", "script_failed", "script_timeout", "transfer_failed", "error"}:
             service_state["last_transfer_error"] = {
@@ -508,6 +540,9 @@ def record_service_event(event, payload):
             }
         if isinstance(payload.get("email"), dict):
             service_state["last_matching_email"] = payload["email"]
+
+        snapshot = json.loads(json.dumps(service_state))
+    persist_service_state(snapshot)
 
 
 def emit_recorded_sse(event, payload):
@@ -531,6 +566,7 @@ def service_status_payload():
         "last_poll_completed": snapshot.get("last_poll_completed"),
         "last_poll_status": snapshot.get("last_poll_status"),
         "last_poll_message": snapshot.get("last_poll_message"),
+        "last_poll_success": snapshot.get("last_poll_success"),
         "last_transfer_success": snapshot.get("last_transfer_success"),
         "last_transfer_error": snapshot.get("last_transfer_error"),
         "last_stream_heartbeat": snapshot.get("last_stream_heartbeat"),
@@ -1117,6 +1153,12 @@ def background_poll_loop():
                 time.sleep(STREAM_POLL_INTERVAL)
             except Exception as exc:
                 print(f"ERROR: background poll failed: {exc}", flush=True)
+                record_service_event("ftp_event", {
+                    "status": "error",
+                    "message": "Mailbox poll failed",
+                    "timestamp": timestamp_now(),
+                })
+                time.sleep(POLL_ERROR_BACKOFF_SECONDS)
             finally:
                 release_named_lock(lock_path)
         else:
