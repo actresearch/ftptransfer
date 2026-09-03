@@ -1448,33 +1448,10 @@ def stream():
             "message": "SSE stream connected",
             "timestamp": datetime.now().isoformat()
         }
-        yield sse_event("stream_status", payload)
+        yield emit_sse("stream_status", payload)
         sys.stdout.flush()
 
         while True:
-            try:
-                heartbeat_payload = {
-                    "status": "stream_heartbeat",
-                    "message": "FTP stream heartbeat",
-                    "timestamp": timestamp_now(),
-                }
-                yield emit_sse("heartbeat", heartbeat_payload)
-                sys.stdout.flush()
-                for event in poll_mailbox_once(emit_sse):
-                    if event:
-                        yield event
-                        sys.stdout.flush()
-            except GeneratorExit:
-                raise
-            except Exception as exc:
-                print(f"ERROR: stream failed: {exc}", flush=True)
-                payload = {
-                    "status": "error",
-                    "message": str(exc),
-                    "timestamp": datetime.now().isoformat()
-                }
-                yield emit_sse("stream_error", payload)
-                sys.stdout.flush()
             heartbeat_payload = {
                 "status": "stream_heartbeat",
                 "message": "FTP stream heartbeat",
