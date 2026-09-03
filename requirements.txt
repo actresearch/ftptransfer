@@ -6,5 +6,6 @@ Flask-SSE
 gevent
 gunicorn
 O365
+packaging
 redis
 watchdog
