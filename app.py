@@ -532,6 +532,7 @@ def record_service_event(event, payload):
             service_state["last_poll_success"] = timestamp
         if status in {"transfer_success", "script_ran", "message_moved"} and payload.get("ok") is not False:
             service_state["last_transfer_success"] = timestamp
+            service_state["last_transfer_error"] = None
         if status in {"not_authenticated", "connection_failed", "script_failed", "script_timeout", "transfer_failed", "error"}:
             service_state["last_transfer_error"] = {
                 "timestamp": timestamp,
